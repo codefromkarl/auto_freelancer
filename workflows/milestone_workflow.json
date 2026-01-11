@@ -1,0 +1,566 @@
+{
+  "name": "Freelancer_Milestone_Handler_V2",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ]
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "telegram-milestone",
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.message.chat.id }}",
+              "value2": "={{ $env.TELEGRAM_CHAT_ID }}"
+            }
+          ]
+        }
+      },
+      "name": "Check Permission",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [350, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $json.message.text.trim();\nconst parts = text.split(' ');\nconst action = parts[0].toLowerCase();\nreturn { json: { action, parts: parts.slice(1), full_text: text } };"
+      },
+      "name": "Parse Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "value2": "help"
+            }
+          ]
+        }
+      },
+      "name": "Check Help",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "value2": "create"
+            }
+          ]
+        }
+      },
+      "name": "Check Create",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "value2": "accept"
+            }
+          ]
+        }
+      },
+      "name": "Check Accept",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "value2": "release"
+            }
+          ]
+        }
+      },
+      "name": "Check Release",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 500]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `📋 *Available Commands*\n━━━━━━━━━━━\n\n/create <project_id> <amount> <description>\n  Create a new milestone\n  Example: /create 12345 500 Complete frontend development\n\n/accept <milestone_id>\n  Accept a milestone (start working)\n/release <milestone_id>\n  Release a milestone (request payment)\n/help\n  Show this help message\n━━━━━━━━━━━` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Send Help",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [850, 200],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `❌ *Invalid Command*\n\nUsage: /create <project_id> <amount> <description>\n\nExample: /create 12345 500 Complete frontend` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Invalid Create",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [850, 350],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const parts = $json.parts;\nconst projectId = parseInt(parts[0]);\nconst amount = parseInt(parts[1]) || 100;\nconst description = parts.slice(2).join(' ') || 'Project milestone';\nreturn { json: { project_id: projectId, amount, description } };"
+      },
+      "name": "Parse Create Params",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python_service:8000/api/v1/milestones",
+        "sendBody": true,
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "project_id",
+              "value": "={{ $json.project_id }}"
+            },
+            {
+              "name": "amount",
+              "value": "={{ $json.amount }}"
+            },
+            {
+              "name": "description",
+              "value": "={{ $json.description }}"
+            }
+          ]
+        },
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.PYTHON_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "name": "Create Milestone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1050, 200],
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "python_api_auth",
+          "name": "Python API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `✅ *Milestone Created*\n━━━━━━━━━━━\nProject ID: ${{ $json.project_id }}` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Create Success",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [1250, 200],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `❌ *Milestone Creation Failed*\n\nPlease check the format and try again.` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Create Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [1250, 300],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const milestoneId = parseInt($json.parts[0]);\nreturn { json: { milestone_id: milestoneId } };"
+      },
+      "name": "Parse Milestone ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [850, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ `http://python_service:8000/api/v1/milestones/${$json.milestone_id}/accept` }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.PYTHON_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "name": "Accept Milestone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1050, 400],
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "python_api_auth",
+          "name": "Python API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ `http://python_service:8000/api/v1/milestones/${$json.milestone_id}/release` }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.PYTHON_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "name": "Release Milestone",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1050, 500],
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "python_api_auth",
+          "name": "Python API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `✅ *Milestone Accepted*\n━━━━━━━━━━━\nMilestone ID: ${{ $json.milestone_id }}` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Accept Success",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [1250, 400],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `💰 *Payment Requested*\n━━━━━━━━━━━\nMilestone ID: ${{ $json.milestone_id }}` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Release Success",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [1250, 500],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `❌ *Milestone Action Failed*\n\nPlease check the milestone ID and try again.` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Milestone Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [1250, 450],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `❌ *Unknown Command*\n\nUse /help to see available commands.` }}",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Unknown",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [850, 400],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Permission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Permission": {
+      "main": [
+        [
+          {
+            "node": "Parse Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Command": {
+      "main": [
+        [
+          {
+            "node": "Check Help",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Create",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Accept",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Release",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Help": {
+      "main": [
+        [
+          {
+            "node": "Send Help",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Create": {
+      "main": [
+        [
+          {
+            "node": "Notify Invalid Create",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Create Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Create Params": {
+      "main": [
+        [
+          {
+            "node": "Create Milestone",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Milestone": {
+      "main": [
+        [
+          {
+            "node": "Notify Create Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Create Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Accept": {
+      "main": [
+        [
+          {
+            "node": "Parse Milestone ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Milestone ID": {
+      "main": [
+        [
+          {
+            "node": "Accept Milestone",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Release Milestone",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept Milestone": {
+      "main": [
+        [
+          {
+            "node": "Notify Accept Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Milestone Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Release": {
+      "main": [
+        [
+          {
+            "node": "Parse Milestone ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Release Milestone": {
+      "main": [
+        [
+          {
+            "node": "Notify Release Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Milestone Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

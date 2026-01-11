@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_bidmaster
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+      - N8N_HOST=${DOMAIN_NAME}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - NODE_ENV=production
+      - WEBHOOK_URL=https://${DOMAIN_NAME}
+      - GENERIC_TIMEZONE=${TIMEZONE}
+      - NODE_FUNCTION_ALLOW_BUILTIN=moment,lodash,path
+      - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash
+      - HTTP_PROXY=${HTTP_PROXY:-http://host.docker.internal:7897}
+      - HTTPS_PROXY=${HTTPS_PROXY:-http://host.docker.internal:7897}
+      - NO_PROXY=localhost,127.0.0.1,python_service,n8n,freelancer_python_api
+      - N8N_PROXY_HOPS=1
+      - N8N_SECURE_COOKIE=false
+      - N8N_COMMUNITY_PACKAGES_ENABLED=false
+      - EXECUTIONS_TIMEOUT=300
+      - N8N_PAYLOAD_SIZE_MAX=50
+      - EXECUTIONS_PROCESS=main
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
+      - EXECUTIONS_DATA_SAVE_ON_ERROR=all
+      - EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS=true
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+      - ./workflows:/home/node/.n8n/workflows:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - bidmaster_net
+    depends_on:
+      - python_service
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    pids_limit: 1000
+
+  python_service:
+    build:
+      context: ./python_service
+      dockerfile: Dockerfile
+    container_name: freelancer_python_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - FREELANCER_OAUTH_TOKEN=${FREELANCER_OAUTH_TOKEN}
+      - FREELANCER_USER_ID=${FREELANCER_USER_ID}
+      - FLN_URL=${FLN_URL:-https://www.freelancer.com}
+      - PYTHON_API_KEY=${PYTHON_API_KEY}
+      - DATABASE_PATH=/app/data/freelancer.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=${TIMEZONE}
+      - HTTP_PROXY=${HTTP_PROXY:-http://host.docker.internal:7897}
+      - HTTPS_PROXY=${HTTPS_PROXY:-http://host.docker.internal:7897}
+      - NO_PROXY=localhost,127.0.0.1,python_service,n8n,freelancer_python_api
+    volumes:
+      - ./python_service/data:/app/data
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - bidmaster_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    pids_limit: 500
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared_tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --protocol http2 --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    environment:
+      - HTTP_PROXY=${HTTP_PROXY:-http://host.docker.internal:7897}
+      - HTTPS_PROXY=${HTTPS_PROXY:-http://host.docker.internal:7897}
+      - NO_PROXY=localhost,127.0.0.1,n8n
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - bidmaster_net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    pids_limit: 100
+
+networks:
+  bidmaster_net:
+    driver: bridge

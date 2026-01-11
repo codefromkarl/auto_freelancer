@@ -127,3 +127,7 @@ review_report.txt
 # =============================================================================
 .DS_Store
 Thumbs.db
+.codex-session
+.gemini-session
+.opencode-session
+.gitignore

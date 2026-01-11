@@ -1,0 +1,201 @@
+{
+  "name": "Freelancer Message Sync & CRM Polling",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "trigger_cron",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python_service:8000/api/v1/messages/sync",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.PYTHON_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "sync_api",
+      "name": "Sync Messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://python_service:8000/api/v1/messages/unread",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.PYTHON_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get_unread",
+      "name": "Get Unread",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data.threads",
+        "options": {}
+      },
+      "id": "split_threads",
+      "name": "Split Threads",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python_service:8000/api/v1/ai/replies",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.PYTHON_API_KEY}}"
+            }
+          ]
+        },
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "thread_id",
+              "value": "={{$json.thread_id}}"
+            },
+            {
+              "name": "context_messages",
+              "value": "={{$json.messages}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "gen_ai_replies",
+      "name": "Generate AI Replies",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$env.TELEGRAM_CHAT_ID}}",
+        "text": "=新消息来自线程 {{$node[\"split_threads\"]..json[\"thread_id\"]}}:\n\n{{$node[\"split_threads\"]..json[\"messages\"][0][\"message\"]}}\n\n请选择回复:",
+        "replyMarkup": "inline_keyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "buttons": [
+                {
+                  "text": "👔 专业",
+                  "callback_data": "=send:{{$json.thread_id}}:{{$json.replies.find(r => r.tone === 'professional').id}}"
+                },
+                {
+                  "text": "🔥 热情",
+                  "callback_data": "=send:{{$json.thread_id}}:{{$json.replies.find(r => r.tone === 'enthusiastic').id}}"
+                }
+              ]
+            },
+            {
+              "buttons": [
+                {
+                  "text": "⚡ 简洁",
+                  "callback_data": "=send:{{$json.thread_id}}:{{$json.replies.find(r => r.tone === 'concise').id}}"
+                },
+                {
+                  "text": "🔕 忽略",
+                  "callback_data": "=ignore:{{$json.thread_id}}"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "id": "send_tg",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [1400, 300]
+    }
+  ],
+  "connections": {
+    "trigger_cron": {
+      "main": [
+        [
+          {
+            "node": "sync_api",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sync_api": {
+      "main": [
+        [
+          {
+            "node": "get_unread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_unread": {
+      "main": [
+        [
+          {
+            "node": "split_threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "split_threads": {
+      "main": [
+        [
+          {
+            "node": "gen_ai_replies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "gen_ai_replies": {
+      "main": [
+        [
+          {
+            "node": "send_tg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

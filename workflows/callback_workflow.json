@@ -1,0 +1,357 @@
+{
+  "name": "Freelancer_Callback_Handler_V2",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "callback_query"
+        ]
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "telegram-callback",
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.callback_query.message.chat.id }}",
+              "value2": "={{ $env.TELEGRAM_CHAT_ID }}"
+            }
+          ]
+        }
+      },
+      "name": "Check Permission",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [350, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json.callback_query.data;\nconst parts = data.split(':');\nreturn { json: { action: parts[0], id: parts[1], amount: parts[2] || null, callback_query_id: $json.callback_query.id } };"
+      },
+      "name": "Parse Callback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [550, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "value2": "bid"
+            }
+          ]
+        }
+      },
+      "name": "Check Bid Action",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "value2": "ignore"
+            }
+          ]
+        }
+      },
+      "name": "Check Ignore",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "value2": "edit"
+            }
+          ]
+        }
+      },
+      "name": "Check Edit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [700, 500]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=❌ *Project Ignored*\n━━━━━━━━━━━━━\nProject ID: {{ $json.id }}\n\nThe project has been marked as ignored.",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Ignore",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [850, 400],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ `✏️ *Custom Bid Request*\n━━━━━━━━━━━━━\nProject ID: ${{ $json.id }}` }}\n\nPlease reply with bid amount in format:\n/bid <project_id> <amount>\n\nExample: /bid 12345 500` ",
+        "parseMode": "Markdown"
+      },
+      "name": "Request Custom Bid",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [850, 500],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ `http://python_service:8000/api/v1/projects/${$json.id}` }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.PYTHON_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "name": "Load Project Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [950, 200],
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "python_api_auth",
+          "name": "Python API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python_service:8000/api/v1/bids",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "project_id",
+              "value": "={{ $json.id }}"
+            },
+            {
+              "name": "amount",
+              "value": "={{ $json.amount || $json.suggested_bid || $json.budget_minimum || 0 }}"
+            },
+            {
+              "name": "period",
+              "value": "3"
+            },
+            {
+              "name": "description",
+              "value": "={{ $json.proposal_draft || 'Based on my relevant experience with...' }}"
+            }
+          ]
+        },
+        "options": {},
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.PYTHON_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "name": "Submit Bid",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1150, 200],
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "python_api_auth",
+          "name": "Python API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=✅ *Bid Submitted Successfully!*\n━━━━━━━━━━━━━\nProject ID: {{ $json.id }}\n💰 *Bid Amount*: {{ $json.currency_code || 'USD' }} {{ $json.amount || $json.suggested_bid || $json.budget_minimum || 0 }}\n\nThe bid has been submitted to Freelancer.com.",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Success",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [1350, 200],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=❌ *Bid Submission Failed*\n━━━━━━━━━━━━━\nProject ID: {{ $json.id }}\n\nThere was an error submitting the bid. Please check the logs and try again.",
+        "parseMode": "Markdown"
+      },
+      "name": "Notify Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [1350, 400],
+      "retryOnFail": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram_creds",
+          "name": "Telegram Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Permission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Permission": {
+      "main": [
+        [
+          {
+            "node": "Parse Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Callback": {
+      "main": [
+        [
+          {
+            "node": "Check Bid Action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Ignore",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Edit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Bid Action": {
+      "main": [
+        [
+          {
+            "node": "Load Project Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Ignore": {
+      "main": [
+        [
+          {
+            "node": "Notify Ignore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Edit": {
+      "main": [
+        [
+          {
+            "node": "Request Custom Bid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Project Data": {
+      "main": [
+        [
+          {
+            "node": "Submit Bid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Submit Bid": {
+      "main": [
+        [
+          {
+            "node": "Notify Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
