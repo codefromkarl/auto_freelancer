@@ -196,12 +196,10 @@ async def search_projects(
             
             # 准备 SDK 详情请求参数
             proj_details_obj = create_get_projects_project_details_object(
-                full_description=True,
-                bid_stats=True
+                full_description=True
             )
             user_details_obj = create_get_projects_user_details_object(
                 basic=True,
-                details=True,
                 reputation=True,
                 employer_reputation=True
             )

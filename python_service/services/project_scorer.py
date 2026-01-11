@@ -120,46 +120,69 @@ class RequirementQualityScorer:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         # Use config from settings if available
         clarity_cfg = config.get("clarity", {}) if config else {}
-        self.deliverable_kws = clarity_cfg.get("deliverable_keywords", ["deliverable", "output", "result", "complete", "milestone", "step"])
-        self.acceptance_kws = clarity_cfg.get("acceptance_keywords", ["acceptance", "criteria", "requirements", "specs", "specification"])
-        self.tech_spec_kws = clarity_cfg.get("tech_spec_keywords", ["flask", "selenium", "pandas", "fastapi", "sqlalchemy", "react", "vue", "docker", "kubernetes", "n8n"])
-        self.vague_kws = clarity_cfg.get("vague_keywords", ["optimize", "improve", "insights", "better", "best way", "enhancement"])
+        self.deliverable_kws = clarity_cfg.get(
+            "deliverable_keywords",
+            ["deliverable", "output", "result", "complete", "milestone", "step"],
+        )
+        self.acceptance_kws = clarity_cfg.get(
+            "acceptance_keywords",
+            ["acceptance", "criteria", "requirements", "specs", "specification"],
+        )
+        self.tech_spec_kws = clarity_cfg.get(
+            "tech_spec_keywords",
+            [
+                "flask",
+                "selenium",
+                "pandas",
+                "fastapi",
+                "sqlalchemy",
+                "react",
+                "vue",
+                "docker",
+                "kubernetes",
+                "n8n",
+            ],
+        )
+        self.vague_kws = clarity_cfg.get(
+            "vague_keywords",
+            ["optimize", "improve", "insights", "better", "best way", "enhancement"],
+        )
 
     def score(self, description: str) -> float:
         if not description:
             return 0.0
-        
+
         desc_lower = description.lower()
         score = 0.0
 
         # 1. Deliverables (30% -> 3.0 pts)
         if any(kw in desc_lower for kw in self.deliverable_kws):
             score += 3.0
-        
+
         # 2. Acceptance Criteria (25% -> 2.5 pts)
         if any(kw in desc_lower for kw in self.acceptance_kws):
             score += 2.5
-        
+
         # 3. Tech Specs (25% -> 2.5 pts)
         # Use more specific matching for tech stack
         matched_tech = [kw for kw in self.tech_spec_kws if kw in desc_lower]
         if matched_tech:
             score += min(len(matched_tech) * 0.5, 2.5)
-        
+
         # 4. No Vague Terms (15% -> 1.5 pts)
         vague_count = sum(1 for kw in self.vague_kws if kw in desc_lower)
         vague_penalty = min(vague_count * 0.5, 1.5)
-        score += (1.5 - vague_penalty)
+        score += 1.5 - vague_penalty
 
         # 5. Description Length (5% -> 0.5 pts)
         length = len(description)
-        if length < 200:
-            score -= 2.0 # Heavy penalty for too short
-        elif length > 1000 and not matched_tech:
-            score -= 1.0 # Penalty for long but no tech details
-        else:
-            score += 0.5
-        
+        if length < 50:
+            score -= 1.0  # Slight penalty for too short (may be vague)
+        elif length > 1500 and not matched_tech:
+            score -= 1.0  # Penalty for extremely long but no tech details
+        elif length >= 200:
+            score += 0.5  # Appropriate length gets bonus
+
         return max(0.0, min(score, 10.0))
 
 
@@ -259,11 +282,13 @@ class ProjectScorer:
         """
         rules = settings.scoring_rules
         self.config = config
-        self.weights = config.weights if config else rules.get("weights", DEFAULT_WEIGHTS.copy())
+        self.weights = (
+            config.weights if config else rules.get("weights", DEFAULT_WEIGHTS.copy())
+        )
         self.user_skills = config.user_skills if config else settings.DEFAULT_SKILLS
         self.min_hours = config.min_hours if config else 5
         self.max_hours = config.max_hours if config else 500
-        
+
         # Load risk keywords from YAML if available, otherwise use defaults
         if config and config.risk_keywords:
             self.risk_keywords = config.risk_keywords
@@ -485,7 +510,7 @@ class ProjectScorer:
             or project.get("description")
             or project.get("preview_description", "")
         )
-        
+
         scorer = RequirementQualityScorer(config=settings.scoring_rules)
         return scorer.score(description)
 
@@ -548,38 +573,38 @@ class ProjectScorer:
         """
         Score customer activity/trust (0-10 points).
         """
-        score = 7.0 # Base score for established customers
+        score = 7.0  # Base score for established customers
         owner_info = project.get("owner_info")
         if not owner_info:
-            return 3.0 # Penalty for no info
+            return 3.0  # Penalty for no info
 
         # 1. Payment Verification (P0)
         if not owner_info.get("payment_verified"):
             score -= 5.0
-        
+
         # 2. Hire Rate
         jobs_posted = int(owner_info.get("jobs_posted", 0))
         jobs_hired = int(owner_info.get("jobs_hired", 0))
         hire_rate = jobs_hired / jobs_posted if jobs_posted > 0 else 0
-        
+
         if jobs_posted > 0 and hire_rate < 0.30:
             score -= 3.0
-        
+
         # 3. New Customer
         if jobs_posted == 0:
             score -= 4.0
-        
+
         # 4. Activity
         if owner_info.get("online_status") == "online":
             score += 2.0
-        
+
         # 5. Reputation
         rating = float(owner_info.get("rating", 0))
         if rating >= 4.5:
             score += 3.0
         elif rating >= 4.0:
             score += 1.5
-            
+
         return max(0.0, min(score, 10.0))
 
     def score_tech_match(self, project: Dict[str, Any]) -> float:
@@ -644,13 +669,9 @@ class ProjectScorer:
             reasons.append("技术高度匹配")
         return "，".join(reasons) + "。"
 
-    def generate_proposal_draft(
-        self, project: Dict[str, Any], breakdown: ScoreBreakdown
-    ) -> str:
-        """Generate a proposal draft."""
-        return f"Proposal for {project.get('title')}. AI Score: {breakdown.budget_efficiency_score}"
-
-    def score_project(self, project: Dict[str, Any], client_risk_score: Optional[int] = None) -> ProjectScore:
+    def score_project(
+        self, project: Dict[str, Any], client_risk_score: Optional[int] = None
+    ) -> ProjectScore:
         """
         Calculate complete score for a project (10-point scale).
 
@@ -696,19 +717,20 @@ class ProjectScorer:
         # ARC-001 / REF-006: High risk penalty (>60 risk score)
         if client_risk_score is not None and client_risk_score > 60:
             penalty_multiplier = rules.get("risk", {}).get("penalty_multiplier", 0.5)
-            logger.warning(f"Project {project.get('id')} has high risk score {client_risk_score}, applying penalty multiplier {penalty_multiplier}")
+            logger.warning(
+                f"Project {project.get('id')} has high risk score {client_risk_score}, applying penalty multiplier {penalty_multiplier}"
+            )
             total *= penalty_multiplier
 
         grade = self.calculate_grade(total)
         reason = self.generate_reason(breakdown, project)
-        proposal = self.generate_proposal_draft(project, breakdown)
 
         return ProjectScore(
             project_id=project.get("id"),
             ai_score=round(total, 2),
             ai_grade=grade,
             ai_reason=reason,
-            ai_proposal_draft=proposal,
+            ai_proposal_draft="",  # Proposal generation moved to ProposalService
             score_breakdown=breakdown,
         )
 

@@ -20,10 +20,13 @@ import json
 import logging
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
+from decimal import Decimal
 
 from config import settings
 from database.models import Project
 from sqlalchemy.orm import Session
+from utils.currency_converter import get_currency_converter
+from services.project_scorer import get_project_scorer
 
 logger = logging.getLogger(__name__)
 
@@ -104,51 +107,61 @@ class LLMScoringConfig:
 
 
 def _get_default_system_prompt() -> str:
-    """获取默认系统提示词（基于评分目标优化）"""
+    """获取默认系统提示词（仅用于评分，不包含提案生成逻辑）"""
     return """
 You are an expert Freelancer project evaluator. Your goal is to identify
-PROFITABLE and CLEAR projects for a senior developer, maximizing
-your win rate and successful completion rate.
+projects with HIGH WIN RATE and COMPLETION RATE for a senior developer.
+
+PRIMARY GOAL: Maximize win rate and successful project completion, not just profit.
 
 EVALUATION WORKFLOW:
 1. Estimate Workload:
-   - Simple scripts/automation: 10-20h
+   - Simple scripts/automation: 5-15h (small task multiplier 0.1-0.3)
+   - Bug fixes/updates: 10-20h
    - API integration/Scraping: 15-30h
    - Mobile apps (iOS/Android): 60-120h+
    - Web Platform: 40-80h+
    - AI/LLM integration: +20h extra complexity
 
 2. Calculate Hourly Rate: (budget_max) / (estimated_hours)
-   - $50+/hour: EXCELLENT (Score 9-10)
-   - $30-50/hour: GOOD (Score 7-9)
-   - $20-30/hour: FAIR (Score 5-7)
-   - <$15/hour: POOR (Score < 3)
+   - $20-60/hour: OPTIMAL for win rate (Score 8-10)
+   - $60-80/hour: GOOD but competitive (Score 6-8)
+   - $80+/hour: HIGH RISK - hard to win (Score 4-6)
+   - $15-20/hour: FAIR (Score 6-8)
+   - <$15/hour: LOW VALUE (Score < 5)
 
-3. Identify Risks & Clarity:
-   - Clarity: Does it name specific tools (e.g., "n8n", "Airtable", "MailerLite")?
-     If yes, Clarity score should be at least 7.
-   - Vague keywords (e.g., "optimize", "insights") should penalize 1 point each,
-     NOT result in zero score.
+3. Assess Competition:
+   - 0-4 bids: SUSPICIOUS - likely low quality (Score 2)
+   - 5-20 bids: OPTIMAL for win rate (Score 10)
+   - 21-40 bids: MODERATE competition (Score 6)
+   - >40 bids: HIGH competition - hard to win (Score 2)
+   - New projects (<24h old): BONUS - slightly higher score
 
-SCORING CRITERIA (0-10):
-- Budget Efficiency (30%): Primary factor. Profitability relative to effort.
-- Requirement Clarity (25%): How well defined is the task?
-- Technical Match (20%): Does it fit standard automation/backend/AI stacks?
-- Client Trust (10%): History and verification status.
-- Competition Risk (10%): High bid count (>50) reduces score.
+4. Identify Risks & Clarity:
+   - Clarity: Does it name specific deliverables, acceptance criteria, tools?
+   - Vague keywords (e.g., "optimize", "insights", "improve") reduce clarity score
+   - Long descriptions without technical details are LOW QUALITY signals
+
+SCORING CRITERIA (0-10) - WIN RATE OPTIMIZED:
+- Budget Efficiency (15%): $20-60/h is optimal. High rates ($80+) hurt win rate.
+- Competition (25%): 5-20 bids is optimal. Too few = bad project, too many = hard to win.
+- Requirement Clarity (25%): Specific deliverables and acceptance criteria required.
+- Client Trust (20%): Payment verification and hire rate are CRITICAL for completion.
+- Technical Match (10%): Must fit standard stacks (Python, API, automation).
 - Risk Assessment (5%): Overall project risk evaluation.
 
-SCORING RULES:
-- High hourly rate ($50+) MUST result in a Budget score > 8.0.
-- Low hourly rate (<$15) MUST result in a Budget score < 4.0.
-- If keywords like "n8n", "Python", or "API" are present,
-  Technical Match should be > 7.0.
+SCORING RULES (WIN RATE FOCUS):
+- Hourly rate $20-60 MUST result in Budget score >= 8.0.
+- Hourly rate $80+ MUST result in Budget score <= 6.0 (hard to win).
+- Payment NOT verified MUST result in Client score <= 5.0.
+- New client (0 projects) MUST result in Client score <= 5.0.
+- Bid count 5-20 MUST result in Competition score >= 8.0.
+- Bid count 0-4 MUST result in Competition score <= 3.0 (suspicious).
 
 Return strict JSON only:
 {
     "score": 7.5,
     "reason": "Clear explanation (2-3 sentences)",
-    "proposal": "Brief professional proposal",
     "suggested_bid": 500,
     "estimated_hours": 40,
     "hourly_rate": 25.0,
@@ -180,15 +193,18 @@ class LLMProvider(ABC):
     def _parse_response(self, content: str, model: str) -> Optional[Dict[str, Any]]:
         """解析 LLM 响应 (REF-005)"""
         import re
+
         parsed = None
-        
+
         # 1. 尝试从 Markdown 代码块提取
-        json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+        json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
         if json_match:
             try:
                 parsed = json.loads(json_match.group(1))
             except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse JSON from markdown block in {model} response: {e}")
+                logger.warning(
+                    f"Failed to parse JSON from markdown block in {model} response: {e}"
+                )
 
         # 2. 纯 JSON 回退
         if not parsed:
@@ -202,18 +218,22 @@ class LLMProvider(ABC):
                     try:
                         parsed = json.loads(content[start_idx : end_idx + 1])
                     except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse JSON from extracted substring in {model} response: {e}")
+                        logger.error(
+                            f"Failed to parse JSON from extracted substring in {model} response: {e}"
+                        )
 
         if not parsed:
-            logger.error(f"Could not extract valid JSON from {model} response. Content snippet: {content[:200]}")
+            logger.error(
+                f"Could not extract valid JSON from {model} response. Content snippet: {content[:200]}"
+            )
             return None
 
         try:
             score = float(parsed.get("score", 0.0))
             return {
                 "score": max(0.0, min(10.0, score)),
-                "reason": str(parsed.get("reason", "")).strip() or "No reason provided.",
-                "proposal": str(parsed.get("proposal", "")).strip() or "No proposal provided.",
+                "reason": str(parsed.get("reason", "")).strip()
+                or "No reason provided.",
                 "suggested_bid": self._parse_float(parsed.get("suggested_bid")),
                 "estimated_hours": self._parse_int(parsed.get("estimated_hours")),
                 "hourly_rate": self._parse_float(parsed.get("hourly_rate")),
@@ -370,18 +390,39 @@ class LLMScoringService:
         return provider, client
 
     def _prepare_project_payload(self, project: Project) -> Dict[str, Any]:
-        """Prepare project data for LLM scoring."""
+        """Prepare project data for LLM scoring (Forces USD conversion)."""
+        converter = get_currency_converter()
+        currency_code = project.currency_code or "USD"
+
+        # Convert budget to USD to prevent LLM hallucinations with high-value currencies (e.g. INR, IDR)
+        # Properly handle Decimal type from database
+        budget_min = (
+            float(project.budget_minimum)
+            if project.budget_minimum is not None and float(project.budget_minimum) > 0
+            else 0.0
+        )
+        budget_max = (
+            float(project.budget_maximum)
+            if project.budget_maximum is not None and float(project.budget_maximum) > 0
+            else 0.0
+        )
+
+        rate = converter.get_rate_sync(currency_code)
+        budget_min_usd = (
+            (budget_min * rate) if budget_min > 0 and rate is not None else None
+        )
+        budget_max_usd = (
+            (budget_max * rate) if budget_max > 0 and rate is not None else None
+        )
+
         return {
             "id": project.freelancer_id,
             "title": project.title,
             "description": project.description or project.preview_description or "",
-            "budget_minimum": float(project.budget_minimum)
-            if project.budget_minimum
-            else None,
-            "budget_maximum": float(project.budget_maximum)
-            if project.budget_maximum
-            else None,
-            "currency_code": project.currency_code,
+            "budget_minimum": budget_min_usd,  # Sent as USD
+            "budget_maximum": budget_max_usd,  # Sent as USD
+            "currency_code": "USD",  # Explicitly tell LLM it's USD
+            "original_currency": currency_code,
             "skills": project.skills,
             "bid_stats": json.loads(project.bid_stats) if project.bid_stats else None,
             "owner_info": json.loads(project.owner_info)
@@ -392,7 +433,9 @@ class LLMScoringService:
     async def _score_with_providers(
         self,
         payload: Dict[str, Any],
-        provider_clients: Optional[List[Tuple[LLMProvider, Any, LLMProviderConfig]]] = None,
+        provider_clients: Optional[
+            List[Tuple[LLMProvider, Any, LLMProviderConfig]]
+        ] = None,
         system_prompt: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Score using multiple providers concurrently with race/ensemble modes."""
@@ -447,9 +490,7 @@ class LLMScoringService:
             return False, None
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        valid_results = [
-            r for r in results if isinstance(r, dict) and r is not None
-        ]
+        valid_results = [r for r in results if isinstance(r, dict) and r is not None]
         if not valid_results:
             return False, None
 
@@ -462,7 +503,6 @@ class LLMScoringService:
         numeric_fields = ["score", "suggested_bid", "estimated_hours", "hourly_rate"]
         aggregated: Dict[str, Any] = {
             "reason": best.get("reason"),
-            "proposal": best.get("proposal"),
             "provider_model": "ensemble",
         }
 
@@ -559,10 +599,13 @@ class LLMScoringService:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             scored_results = []
-            for i, (success, result) in enumerate(results):
-                if isinstance(results[i], Exception):
-                    logger.error(f"Batch processing error: {results[i]}")
-                elif success and result:
+            for i, res in enumerate(results):
+                if isinstance(res, Exception):
+                    logger.error(f"Batch processing error: {res}")
+                    continue
+
+                success, result = res
+                if success and result:
                     scored_results.append(
                         {"project_id": batch[i].freelancer_id, **result}
                     )
@@ -579,11 +622,119 @@ class LLMScoringService:
             batch = projects[start : start + effective_batch_size]
             scored = await process_batch(batch)
 
+            # Sanitization and Fallback Logic
+            scorer = get_project_scorer()
+
             for item in scored:
                 project_id = item["project_id"]
                 score = item["score"]
 
-                # 更新数据库
+                # Retrieve original project object from batch
+                project_obj = next(
+                    (p for p in batch if p.freelancer_id == project_id), None
+                )
+                if not project_obj:
+                    continue
+
+                # 1. Fallback for estimated_hours
+                if not item.get("estimated_hours") or item.get("estimated_hours") == 0:
+                    project_dict = project_obj.to_dict()
+                    estimated = scorer.estimate_project_hours(project_dict)
+                    item["estimated_hours"] = estimated
+                    logger.info(
+                        f"Project {project_id}: LLM failed to estimate hours, fallback to {estimated}h"
+                    )
+
+                # 2. Recalculate/Validate Hourly Rate (using USD budget)
+                # LLM might have failed math or used wrong budget
+                est_hours = item.get("estimated_hours")
+
+                # Get USD budget again (safe recalculation)
+                converter = get_currency_converter()
+                curr_code = project_obj.currency_code or "USD"
+                # Properly handle Decimal type from database
+                b_min = (
+                    float(project_obj.budget_minimum)
+                    if project_obj.budget_minimum is not None
+                    and float(project_obj.budget_minimum) > 0
+                    else 0.0
+                )
+                b_max = (
+                    float(project_obj.budget_maximum)
+                    if project_obj.budget_maximum is not None
+                    and float(project_obj.budget_maximum) > 0
+                    else 0.0
+                )
+
+                rate = converter.get_rate_sync(curr_code)
+                b_min_usd = (b_min * rate) if b_min > 0 and rate is not None else None
+                b_max_usd = (b_max * rate) if b_max > 0 and rate is not None else None
+
+                # Check project type (1=Fixed, 2=Hourly usually, but handle None type_id)
+                # If Hourly (type_id=2), rate is the budget itself
+                is_hourly = project_obj.type_id == 2
+
+                if is_hourly:
+                    # Hourly project: rate is the budget itself
+                    calculated_rate = (
+                        (b_min_usd + b_max_usd) / 2
+                        if (b_min_usd and b_max_usd)
+                        else (b_max_usd or b_min_usd)
+                    )
+                    # Use calculated rate if LLM deviates significantly (>50%)
+                    llm_rate = item.get("hourly_rate")
+                    if (
+                        not llm_rate
+                        or abs(llm_rate - calculated_rate) > calculated_rate * 0.5
+                    ):
+                        item["hourly_rate"] = round(calculated_rate, 2)
+                else:
+                    # Fixed price: Rate = Budget / Hours
+                    avg_budget = (
+                        (b_min_usd + b_max_usd) / 2
+                        if (b_min_usd and b_max_usd)
+                        else (b_max_usd or b_min_usd)
+                    )
+                    if avg_budget and est_hours and est_hours > 0:
+                        calculated_rate = avg_budget / est_hours
+                        # Sanity check: hourly rate should be reasonable ($15-$200/h)
+                        if calculated_rate > 200:
+                            logger.warning(
+                                f"Project {project_id}: Calculated rate {calculated_rate} exceeds $200/h threshold"
+                            )
+                            item["hourly_rate"] = 200.0
+                        elif calculated_rate < 10:
+                            logger.warning(
+                                f"Project {project_id}: Calculated rate {calculated_rate} below $10/h threshold"
+                            )
+                            item["hourly_rate"] = 10.0
+                        else:
+                            item["hourly_rate"] = round(calculated_rate, 2)
+                    else:
+                        logger.warning(
+                            f"Project {project_id}: Cannot calculate hourly rate (no budget or hours)"
+                        )
+                        item["hourly_rate"] = 0.0
+
+                # 3. Sanity check Suggested Bid
+                # Should not exceed budget max (for fixed)
+                s_bid = item.get("suggested_bid")
+                if s_bid and b_max_usd and s_bid > b_max_usd * 1.2:  # Allow 20% over
+                    logger.warning(
+                        f"Project {project_id}: Suggested bid {s_bid} > budget max {b_max_usd}. Clamping."
+                    )
+                    item["suggested_bid"] = round(b_max_usd, 2)
+
+                # 详细日志：记录LLM返回的所有字段
+                logger.info(
+                    f"[LLM DETAIL] Project {project_id}: score={score:.1f}, "
+                    f"provider={item.get('provider_model', 'unknown')}, "
+                    f"hours={item.get('estimated_hours')}, "
+                    f"rate={item.get('hourly_rate')}, "
+                    f"reason={item.get('reason', '')[:100]}"
+                )
+
+                # 更新数据库（提案生成已移至 ProposalService，此处仅更新评分相关字段）
                 from services import project_service
 
                 project_service.update_project_ai_analysis(
@@ -591,8 +742,8 @@ class LLMScoringService:
                     project_id,
                     score,
                     item["reason"],
-                    item["proposal"],
-                    item["suggested_bid"],
+                    "",  # ai_proposal_draft - now generated by ProposalService
+                    item.get("suggested_bid"),
                     estimated_hours=item.get("estimated_hours"),
                     hourly_rate=item.get("hourly_rate"),
                 )
@@ -601,11 +752,6 @@ class LLMScoringService:
                 if score > top_score:
                     top_score = score
                     top_id = project_id
-
-                logger.info(
-                    f"Scored project {project_id}: {score:.1f} "
-                    f"({item['provider_model']})"
-                )
 
                 # 回调
                 if self.config.on_score_complete:
