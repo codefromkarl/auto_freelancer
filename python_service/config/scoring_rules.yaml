@@ -1,0 +1,31 @@
+# Scoring Weights
+weights:
+  budget_efficiency: 0.15
+  competition: 0.25
+  clarity: 0.25
+  customer: 0.20
+  tech: 0.10
+  risk: 0.05
+
+# Clarity Scoring Rules
+clarity:
+  deliverable_keywords: ["deliverable", "output", "result", "complete", "milestone", "step"]
+  acceptance_keywords: ["acceptance", "criteria", "requirements", "specs", "specification", "test"]
+  tech_spec_keywords: ["flask", "selenium", "pandas", "fastapi", "sqlalchemy", "react", "vue", "docker", "kubernetes", "n8n", "postgresql", "redis"]
+  vague_keywords: ["optimize", "improve", "insights", "better", "best way", "enhancement", "seamless", "flexible"]
+
+# Customer Scoring Rules
+customer:
+  payment_verified_bonus: 0.0
+  payment_not_verified_penalty: -5.0
+  low_hire_rate_threshold: 0.30
+  low_hire_rate_penalty: -3.0
+  new_customer_penalty: -4.0
+  online_bonus: 2.0
+  rating_4_5_bonus: 3.0
+  rating_4_0_bonus: 1.5
+
+# Risk Mapping
+risk:
+  high_risk_threshold: 60
+  penalty_multiplier: 0.5

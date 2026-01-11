@@ -15,8 +15,10 @@ or `reset_singleton()` to clear cached state.
 """
 
 import logging
+import time
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
+from enum import Enum
 
 from config import settings
 from utils.currency_converter import get_currency_converter
@@ -24,15 +26,21 @@ from utils.currency_converter import get_currency_converter
 logger = logging.getLogger(__name__)
 
 
-# 默认权重配置（可用于参考）
 DEFAULT_WEIGHTS = {
-    "budget_efficiency": 0.30,  # 30% - 预算效率是核心
-    "competition": 0.10,  # 10% - 竞争程度
-    "clarity": 0.25,  # 25% - 需求清晰度
-    "customer": 0.10,  # 10% - 客户信誉
-    "tech": 0.20,  # 20% - 技术匹配度
-    "risk": 0.05,  # 5% - 项目风险
+    "budget_efficiency": 0.15,
+    "competition": 0.25,
+    "clarity": 0.25,
+    "customer": 0.20,
+    "tech": 0.10,
+    "risk": 0.05,
 }
+
+
+class ProjectComplexity(Enum):
+    TRIVIAL = (1, 4)
+    SMALL = (4, 20)
+    MEDIUM = (20, 80)
+    LARGE = (80, 200)
 
 
 @dataclass
@@ -82,17 +90,17 @@ class ScoringConfig:
 
     weights: Dict[str, float] = field(
         default_factory=lambda: {
-            "budget_efficiency": 0.30,
-            "competition": 0.10,
+            "budget_efficiency": 0.15,
+            "competition": 0.25,
             "clarity": 0.25,
-            "customer": 0.10,
-            "tech": 0.20,
+            "customer": 0.20,
+            "tech": 0.10,
             "risk": 0.05,
         }
     )
     user_skills: Optional[List[str]] = None
-    min_hours: int = 5
-    max_hours: int = 500
+    min_hours: int = ProjectComplexity.TRIVIAL.value[0]
+    max_hours: int = ProjectComplexity.LARGE.value[1]
     risk_keywords: Optional[Dict[str, List[str]]] = None
     currency_rates: Optional[Dict[str, float]] = None
 
@@ -400,8 +408,20 @@ class ProjectScorer:
         if "n8n" in combined_text or "workflow" in combined_text:
             hours += 15
 
-        # Apply min/max constraints
-        estimated = max(self.min_hours, min(hours, self.max_hours))
+        small_task_keywords = ["fix", "bug", "small", "tweak", "script", "update"]
+        small_hits = sum(1 for kw in small_task_keywords if kw in combined_text)
+        if small_hits:
+            multiplier = 0.3
+            if small_hits >= 2:
+                multiplier = 0.2
+            if small_hits >= 3:
+                multiplier = 0.1
+            hours = hours * multiplier
+
+        min_hours = max(self.min_hours, ProjectComplexity.TRIVIAL.value[0])
+        max_hours = min(self.max_hours, ProjectComplexity.LARGE.value[1])
+        estimated = int(round(hours)) if hours > 0 else 0
+        estimated = max(min_hours, min(estimated, max_hours))
         logger.debug(f"Estimated {estimated} hours for project {project.get('id')}")
         return estimated
 
@@ -444,15 +464,15 @@ class ProjectScorer:
 
         score = 0.0
         if hourly_rate >= 80:
-            score = 10.0
-        elif hourly_rate >= 50:
-            score = 8.0 + (hourly_rate - 50) / 30 * 2.0
-        elif hourly_rate >= 30:
-            score = 6.0 + (hourly_rate - 30) / 20 * 2.0
+            score = max(4.0, 6.0 - (hourly_rate - 80) / 40 * 2.0)
+        elif hourly_rate >= 60:
+            score = 6.0 + (80 - hourly_rate) / 20 * 2.0
+        elif hourly_rate >= 20:
+            score = 8.0 + (hourly_rate - 20) / 40 * 2.0
         elif hourly_rate >= 15:
-            score = 3.0 + (hourly_rate - 15) / 15 * 3.0
+            score = 6.0 + (hourly_rate - 15) / 5 * 2.0
         else:
-            score = max(0.0, hourly_rate / 15 * 3.0)
+            score = max(0.0, hourly_rate / 15 * 6.0)
 
         return score, hourly_rate
 
@@ -474,25 +494,36 @@ class ProjectScorer:
         Score competition level (0-10 points).
 
         评分逻辑：
-        - bid_count <= 5: 低竞争，得分 2.5（容易中标）
-        - bid_count 6-10: 适中竞争，得分 10.0（最佳区间）
-        - bid_count 11-20: 中等竞争，得分 7.5
-        - bid_count 21-40: 较高竞争，得分 5.0
-        - bid_count > 40: 高竞争，得分 2.5
+        - bid_count 0-4: 得分 2.0
+        - bid_count 5-20: 得分 10.0
+        - bid_count 21-40: 得分 6.0
+        - bid_count > 40: 得分 2.0
+        - 24小时内发布项目加分
         """
         bid_stats = project.get("bid_stats", {})
         bid_count = bid_stats.get("bid_count", 0)
 
-        if bid_count <= 5:
-            return 2.5
-        elif bid_count <= 10:
-            return 10.0
+        if bid_count <= 4:
+            score = 2.0
         elif bid_count <= 20:
-            return 7.5
+            score = 10.0
         elif bid_count <= 40:
-            return 5.0
+            score = 6.0
         else:
-            return 2.5
+            score = 2.0
+
+        submitdate = project.get("submitdate")
+        if submitdate:
+            try:
+                submit_ts = float(submitdate)
+                if submit_ts > 1_000_000_000_000:
+                    submit_ts = submit_ts / 1000.0
+                if time.time() - submit_ts <= 24 * 3600:
+                    score = min(10.0, score + 1.0)
+            except (TypeError, ValueError):
+                pass
+
+        return score
 
     def detect_risk_keywords(self, project: Dict[str, Any]) -> Dict[str, List[str]]:
         """
