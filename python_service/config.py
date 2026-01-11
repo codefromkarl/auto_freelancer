@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "gpt-4o-mini"
     LLM_API_URL: Optional[str] = None
+    LLM_SCORING_MODE: str = "ensemble"
 
     # Database Configuration
     DATABASE_PATH: str = "/app/data/freelancer.db"
