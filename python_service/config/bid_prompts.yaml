@@ -1,0 +1,62 @@
+version: "2.0"
+
+personas:
+  frontend:
+    hint: "Focus on UX/UI details, responsiveness, and component reusability. Mention specific framework expertise (React/Vue)."
+    description: "Expert Frontend Developer specializing in modern web interfaces."
+  backend:
+    hint: "Emphasize system architecture, API security, database optimization, and scalability."
+    description: "Senior Backend Engineer with focus on robust and scalable systems."
+  ai:
+    hint: "Highlight experience with LLMs, RAG pipelines, prompt engineering, and Python data stacks."
+    description: "AI Specialist experienced in LLM integration and machine learning."
+  fullstack:
+    hint: "Demonstrate end-to-end capability, from DB design to frontend state management."
+    description: "Versatile Fullstack Developer capable of handling entire product lifecycles."
+  mobile:
+    hint: "Focus on cross-platform performance, native feel, and store deployment experience."
+    description: "Mobile App Developer creating high-performance iOS and Android applications."
+  general:
+    hint: "Professional developer focusing on clean code, timely delivery, and clear communication."
+    description: "Experienced Software Developer with a broad range of technical skills."
+
+styles:
+  narrative:
+    description: "Formal and structured, focusing on technical depth and professionalism."
+  conversational:
+    description: "Friendly and engaging, focusing on collaboration and quick communication."
+
+structures:
+  three_step:
+    steps:
+      - Introduction & Understanding
+      - Proposed Solution & Technical Approach
+      - Call to Action & Availability
+  problem_solution:
+    steps:
+      - Problem Identification
+      - Detailed Solution Implementation
+      - Expected Outcomes & Value Add
+
+detection_patterns:
+  frontend: "(react|vue|angular|javascript|html|css|frontend|ui/ux|figma|tailwind|bootstrap|jquery|dom)"
+  backend: "(python|django|flask|fastapi|node|express|sql|database|aws|backend|api|server|postgres|mysql|mongodb|docker)"
+  ai: "(ai|llm|gpt|openai|machine learning|nlp|vision|tensorflow|pytorch|rag|chatbot|langchain|huggingface)"
+  mobile: "(ios|android|flutter|react native|swift|kotlin|mobile app|ipa|apk)"
+  fullstack: "(fullstack|full stack|mern|mean|web application|end-to-end)"
+
+validation:
+  word_count:
+    min: 50
+    max: 300
+  required_elements:
+    - "Greeting"
+    - "Specific technical mention related to project"
+    - "Proposed timeline or milestone approach"
+    - "Call to action (question or invitation to chat)"
+  forbidden_phrases:
+    - "I am a beginner"
+    - "I will do it for free"
+    - "Dear Sir/Madam"
+    - "Please hire me"
+    - "Lowest price"
