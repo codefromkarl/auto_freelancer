@@ -2,10 +2,12 @@
 
 此目录包含了项目相关的各类 Python 脚本，按功能划分为以下子目录：
 
+> 当前默认执行路径为 `manual_pipeline/`（手动流水线）。系统已移除 n8n 自动编排依赖，统一使用 Python 脚本执行抓取、评分、复核与投标流程。
+
 ## 目录结构
 
 ### 1. `legacy/` (归档脚本)
-包含了项目早期开发阶段使用的抓取和评分脚本。这些脚本目前已被 `python_service` 和 n8n 工作流取代。
+包含了项目早期开发阶段使用的抓取和评分脚本。这些脚本目前已被 `python_service` 与 `manual_pipeline/` 取代。
 - `fetch_and_score_projects.py`: 基础抓取与评分。
 - `fetch_projects_simple.py`: 简化版抓取。
 - `fetch_projects_step1/2/3.py`: 分步抓取流程。

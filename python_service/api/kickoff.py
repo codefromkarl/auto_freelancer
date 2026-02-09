@@ -135,7 +135,7 @@ async def check_and_trigger_kickoff(
     """
     Check project status and trigger kick-off if bid was accepted.
 
-    This endpoint is designed for n8n workflow integration.
+    This endpoint is designed for external workflow integration.
     It queries the Freelancer API to check if the project status is 'awarded'
     and automatically triggers the kick-off if so.
     """

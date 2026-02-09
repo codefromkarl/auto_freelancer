@@ -290,7 +290,7 @@ venv/
 ## Tech Stack
 - Python 3.9+
 - Selenium / Playwright
-- n8n / Zapier (if needed)
+- Zapier / Make (if needed)
 - Python Requests
 
 ## Setup

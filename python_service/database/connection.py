@@ -1,10 +1,11 @@
 """
 Database connection and session management.
 """
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool
 from contextlib import contextmanager
+from fastapi import Request, HTTPException, status
 import os
 
 
@@ -22,9 +23,17 @@ DATABASE_URL = f"sqlite:///{settings.DATABASE_PATH}"
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
+    poolclass=NullPool,
     echo=False,
 )
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_wal_mode(dbapi_connection, connection_record):
+    """Enable WAL journal mode for better concurrent read/write performance."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -67,3 +76,29 @@ def get_db():
         yield session
     finally:
         session.close()
+
+
+async def verify_api_key(request: Request):
+    """Verify API key from request header.
+
+    Supports BYPASS_AUTH=true environment variable for local testing only.
+    """
+    # Allow bypassing auth in test/dev environments via explicit env var
+    if os.environ.get("BYPASS_AUTH", "").lower() == "true":
+        return "bypass-auth"
+
+    api_key = request.headers.get("X-API-Key")
+
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API key"
+        )
+
+    if api_key != settings.PYTHON_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid API key"
+        )
+
+    return api_key

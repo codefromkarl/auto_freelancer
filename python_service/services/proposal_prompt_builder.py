@@ -9,11 +9,21 @@ Proposal Prompt Builder - 标书提示词构建器
 - build_project_context(project, score_data): 构建项目上下文
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import json
 import logging
+from pathlib import Path
+from sqlalchemy.orm import Session
+from config import settings
 
 logger = logging.getLogger(__name__)
+
+RESUME_GUIDE_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "guides" / "个人简历-核心能力.md"
+)
+BID_REFERENCE_SAMPLES_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "bid_reference_samples.json"
+)
 
 
 # 基础提示词（仅用于评分，不包含提案生成逻辑）
@@ -143,8 +153,27 @@ class ProposalPromptBuilder:
         self.base_system_prompt = base_system_prompt or BASE_SYSTEM_PROMPT
         self.style_instructions = style_instructions or STYLE_NARRATIVE
         self.structure_instructions = structure_instructions or STRUCTURE_THREE_STEP
+        self._resume_markdown_cache: Optional[str] = None
+        self._bid_reference_samples_cache: Optional[List[Dict[str, Any]]] = None
 
         logger.debug("ProposalPromptBuilder initialized with custom instructions")
+
+    def fetch_prompts(self, db: Session):
+        """Fetch active prompts from database and update builder state."""
+        from database.models import PromptTemplate
+        
+        # Fetch proposal prompt
+        template = db.query(PromptTemplate).filter(
+            PromptTemplate.category == "proposal",
+            PromptTemplate.is_active == True
+        ).order_by(PromptTemplate.created_at.desc()).first()
+        
+        if template:
+            # We use this as base system prompt for proposals
+            self.base_system_prompt = template.content
+            logger.info(f"Updated proposal base prompt from DB: {template.name}")
+        
+        # Optional: could also fetch style/structure from DB if we added those categories
 
     def build_prompt(
         self,
@@ -169,11 +198,19 @@ class ProposalPromptBuilder:
         # 根据风格和结构选择对应的指令
         style_section = self._get_style_section(style)
         structure_section = self._get_structure_section(structure)
+        reference_section = self.build_bid_reference_context()
+        target_char_min = max(200, int(getattr(settings, "PROPOSAL_TARGET_CHAR_MIN", 700)))
+        target_char_max = max(target_char_min + 50, int(getattr(settings, "PROPOSAL_TARGET_CHAR_MAX", 1200)))
+        hard_char_max = max(target_char_max, int(getattr(settings, "PROPOSAL_MAX_LENGTH", 1800)))
 
         # 组装完整提示词
         full_prompt = f"""你是 Freelancer 平台的资深开发者，擅长撰写高中标率的提案。
 
 {project_context}
+
+{self.build_resume_context(project)}
+
+{reference_section}
 
 {style_section}
 
@@ -182,11 +219,14 @@ class ProposalPromptBuilder:
 请基于以上信息，生成一个专业的、自由职业者风格的提案文本。
 
 要求：
-- 语言风格：根据客户语言自动选择（客户用中文则用中文，客户用英文则用英文）
-- 字数控制：300-500字之间
+- 语言风格：必须全程使用英文（English only），从第一句开始直接英文生成，禁止先写中文再翻译
+- 长度控制：目标 {target_char_min}-{target_char_max} 字符；硬上限不超过 {hard_char_max} 字符
 - 输出格式：仅输出提案文本内容，不要包含 JSON 或其他包装
 - 自然真实：避免模板化、机械化的表达
 - 针对性：紧密围绕客户的具体需求展开
+- **关键词引用**：必须在投标中自然地引用项目标题中的核心关键词（如技术栈、项目类型等），以展示对项目的理解
+- **风控兼容关键词**：正文中必须自然包含以下词汇中的至少两个：technical, implementation, delivery, plan, approach, solution
+- **预算表述**：必须包含单词 budget，并给出清晰的预算/报价讨论语句
 """
 
         return full_prompt
@@ -229,12 +269,11 @@ class ProposalPromptBuilder:
         )
 
         # 预算信息
-        budget_min = project.get("budget_minimum") or project.get("budget", {}).get(
-            "minimum"
-        )
-        budget_max = project.get("budget_maximum") or project.get("budget", {}).get(
-            "maximum"
-        )
+        budget_obj = project.get("budget") or {}
+        if not isinstance(budget_obj, dict):
+            budget_obj = {}
+        budget_min = project.get("budget_minimum") or budget_obj.get("minimum")
+        budget_max = project.get("budget_maximum") or budget_obj.get("maximum")
         currency = project.get("currency_code", "USD")
 
         # 技能要求
@@ -246,21 +285,25 @@ class ProposalPromptBuilder:
                 skills = []
 
         # 竞争情况
-        bid_stats = project.get("bid_stats", {})
+        bid_stats = project.get("bid_stats") or {}
         if isinstance(bid_stats, str):
             try:
                 bid_stats = json.loads(bid_stats)
             except json.JSONDecodeError:
                 bid_stats = {}
+        if not isinstance(bid_stats, dict):
+            bid_stats = {}
         bid_count = bid_stats.get("bid_count", 0)
 
         # 客户信息
-        owner_info = project.get("owner_info", {})
+        owner_info = project.get("owner_info") or {}
         if isinstance(owner_info, str):
             try:
                 owner_info = json.loads(owner_info)
             except json.JSONDecodeError:
                 owner_info = {}
+        if not isinstance(owner_info, dict):
+            owner_info = {}
 
         # 构建上下文描述
         context_parts = ["### 项目基本信息："]
@@ -281,7 +324,7 @@ class ProposalPromptBuilder:
 
         # 添加描述摘要
         if description:
-            desc_preview = description[:500] if len(description) > 500 else description
+            desc_preview = description[:2000] if len(description) > 2000 else description
             context_parts.append(f"\n### 项目详细描述：\n{desc_preview}")
 
         # 添加评分数据（如有）
@@ -301,6 +344,132 @@ class ProposalPromptBuilder:
                 )
 
         return "\n".join(context_parts)
+
+    def _load_resume_markdown(self) -> str:
+        """Load resume guide markdown from docs; best-effort only."""
+        if self._resume_markdown_cache is not None:
+            return self._resume_markdown_cache
+
+        try:
+            self._resume_markdown_cache = RESUME_GUIDE_PATH.read_text(encoding="utf-8")
+        except Exception:
+            self._resume_markdown_cache = ""
+        return self._resume_markdown_cache
+
+    def build_resume_context(self, project: Dict[str, Any]) -> str:
+        """
+        Build concise career profile context from resume for proposal prompting.
+        """
+        project_text = " ".join(
+            [
+                str(project.get("title", "")),
+                str(project.get("description", "")),
+                str(project.get("preview_description", "")),
+                json.dumps(project.get("skills", []), ensure_ascii=False),
+            ]
+        ).lower()
+
+        category_desc = {
+            101: "Backend/API engineering with Python, FastAPI, Java, Spring Boot, and Spring Cloud.",
+            102: "Microservice architecture including service discovery, configuration center, API gateway, and service governance.",
+            103: "Security and auth implementation with OAuth2, RBAC, and API authorization.",
+            104: "AI/LLM engineering with LangChain, RAG retrieval, vector databases, multi-LLM integration, and prompt engineering.",
+            105: "Database delivery across MySQL, SQLite, SQL modeling, and enterprise persistence layers.",
+            106: "Containerized delivery with Docker, Docker Compose, DevOps pipelines, and production-oriented deployment.",
+            107: "Media processing with FFmpeg for video composition and subtitle rendering.",
+        }
+
+        matched_ids: List[int] = []
+        for cid, keywords in settings.RESUME_SKILL_MAPPINGS.items():
+            if any(str(keyword).lower() in project_text for keyword in keywords):
+                matched_ids.append(cid)
+
+        if not matched_ids:
+            matched_ids = [101, 104, 106]
+
+        skills_text = "\n".join(
+            f"- {category_desc.get(cid, 'Relevant professional capability.')}"
+            for cid in matched_ids[:4]
+        )
+
+        resume_md = self._load_resume_markdown()
+        highlights: List[str] = []
+        if "100+并发请求" in resume_md:
+            highlights.append(
+                "Delivered AI systems handling 100+ concurrent requests in production scenarios."
+            )
+        if "<2秒" in resume_md or "<3秒" in resume_md:
+            highlights.append(
+                "Optimized response latency with sub-2s dialogue and sub-3s retrieval performance."
+            )
+        if "效率提升15-26%" in resume_md:
+            highlights.append(
+                "Improved end-to-end media generation efficiency by 15-26% via parallelized workflows."
+            )
+        if "19个REST端点" in resume_md:
+            highlights.append(
+                "Built and maintained a full automation backend with 19 REST endpoints across core modules."
+            )
+
+        if not highlights:
+            highlights.append(
+                "Hands-on delivery across AI platforms, microservices, and workflow automation systems."
+            )
+
+        highlights_text = "\n".join(f"- {item}" for item in highlights[:3])
+
+        return (
+            "### 候选人职业背景（来自个人简历-核心能力）\n"
+            f"{skills_text}\n"
+            "### 候选人可证明的项目成绩\n"
+            f"{highlights_text}"
+        )
+
+    def _load_bid_reference_samples(self) -> List[Dict[str, Any]]:
+        """Load shortlisted bid reference samples for style guidance."""
+        if self._bid_reference_samples_cache is not None:
+            return self._bid_reference_samples_cache
+
+        try:
+            payload = json.loads(
+                BID_REFERENCE_SAMPLES_PATH.read_text(encoding="utf-8")
+            )
+            samples = payload.get("samples", [])
+            if isinstance(samples, list):
+                self._bid_reference_samples_cache = [
+                    item for item in samples if isinstance(item, dict)
+                ]
+            else:
+                self._bid_reference_samples_cache = []
+        except Exception:
+            self._bid_reference_samples_cache = []
+
+        return self._bid_reference_samples_cache
+
+    def build_bid_reference_context(self) -> str:
+        """
+        Build style/structure references from curated real bid samples.
+        """
+        samples = self._load_bid_reference_samples()
+        if not samples:
+            return ""
+
+        lines = ["### 高质量投标参考（仅参考风格与结构，禁止照搬原文）"]
+        for sample in samples[:4]:
+            author = str(sample.get("author", "Unknown"))
+            tags = sample.get("style_tags", [])
+            strengths = sample.get("strengths", [])
+            char_range = str(sample.get("length_chars_range", "700-1200"))
+            tag_text = ", ".join(str(t) for t in tags[:3]) if isinstance(tags, list) else "structured"
+            strength_text = (
+                "; ".join(str(s) for s in strengths[:2]) if isinstance(strengths, list) else "clear scope and milestones"
+            )
+            lines.append(
+                f"- {author}: style={tag_text}; length≈{char_range}; strengths={strength_text}"
+            )
+
+        lines.append("- 仅吸收其逻辑与表达节奏，不要复用具体句子。")
+        return "\n".join(lines)
 
     def build_scoring_prompt(self, project: Dict[str, Any]) -> str:
         """

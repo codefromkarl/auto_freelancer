@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 import logging
+from sqlalchemy.orm import Session
 
 from services.project_scorer import (
     ProjectScorer,
@@ -250,12 +251,14 @@ class LLMBasedScoringStrategy(ScoringStrategy):
     async def score_async(
         self,
         context: ScoringContext,
+        db: Optional[Session] = None,
     ) -> ScoringResult:
         """
         异步执行 LLM 评分。
 
         Args:
             context: 评分上下文
+            db: 可选的数据库会话
 
         Returns:
             评分结果
@@ -266,6 +269,11 @@ class LLMBasedScoringStrategy(ScoringStrategy):
         service = self._get_service()
         if service is None:
             raise ValueError("LLM scoring service not available")
+
+        # Fetch prompt from DB if db provided and system_prompt not set
+        effective_prompt = self.system_prompt
+        if not effective_prompt and db:
+            effective_prompt = service.fetch_system_prompt(db, "scoring")
 
         # 创建临时 Project 对象
         project_data = context.project
@@ -283,7 +291,7 @@ class LLMBasedScoringStrategy(ScoringStrategy):
 
         result = await service.score_single_project(
             project,
-            system_prompt=self.system_prompt,
+            system_prompt=effective_prompt,
         )
 
         if result is None:

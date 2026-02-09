@@ -23,11 +23,51 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from abc import ABC, abstractmethod
+from sqlalchemy.orm import Session
 
 from config import settings
 from database.models import Project
 
 logger = logging.getLogger(__name__)
+
+_CJK_PATTERN = re.compile(r"[\u3400-\u9FFF]")
+_NUMERIC_PATTERN = re.compile(
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?",
+    re.IGNORECASE,
+)
+_QUOTE_NUMBER_PATTERNS = [
+    re.compile(
+        r"\$\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(?:usd|eur|gbp|cad|aud|sgd|cny)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:budget|quote|bid|price)[^0-9\n]{0,80}((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)",
+        re.IGNORECASE,
+    ),
+]
+_BUDGET_CONTEXT_PATTERN = re.compile(r"\bbudget\b[^\n]{0,120}", re.IGNORECASE)
+_LEGACY_QUOTE_NUMBER_PATTERN = re.compile(
+    r"(?:budget|quote|bid|price|\$|usd|eur|gbp|cad|aud|sgd|cny)\D{0,80}((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_PROJECT_REQUIREMENT_HINTS: List[Tuple[Tuple[str, ...], str]] = [
+    (("state machine", "fsm"), "state machine"),
+    (("otp", "one-time password"), "otp verification"),
+    (("admin dashboard", "admin panel", "dashboard"), "admin dashboard"),
+    (("schedule", "scheduling", "production planning"), "scheduling"),
+    (("whatsapp", "whatsapp business"), "whatsapp integration"),
+    (("webhook",), "webhook handling"),
+    (("rest api", "restful", "endpoint"), "rest api"),
+    (("readme", "setup", "documentation"), "readme/setup"),
+    (("pagination", "load more", "infinite scroll"), "pagination"),
+    (("beautifulsoup", "bs4"), "beautifulsoup parsing"),
+    (("requests",), "requests stack"),
+    (("logging", "error handling"), "logging/error handling"),
+]
 
 
 class ProposalValidatorProtocol(Protocol):
@@ -104,8 +144,10 @@ class ProposalConfig:
 
     max_retries: int = 3
     timeout: float = 60.0
-    min_length: int = 200
-    max_length: int = 800
+    min_length: int = 280
+    max_length: int = 1800
+    target_char_min: int = 700
+    target_char_max: int = 1200
     validate_before_return: bool = True
     fallback_enabled: bool = True
     model: str = "gpt-4o-mini"
@@ -117,8 +159,10 @@ class ProposalConfig:
         return cls(
             max_retries=getattr(settings, "PROPOSAL_MAX_RETRIES", 3),
             timeout=getattr(settings, "PROPOSAL_TIMEOUT", 60.0),
-            min_length=getattr(settings, "PROPOSAL_MIN_LENGTH", 200),
-            max_length=getattr(settings, "PROPOSAL_MAX_LENGTH", 800),
+            min_length=getattr(settings, "PROPOSAL_MIN_LENGTH", 280),
+            max_length=getattr(settings, "PROPOSAL_MAX_LENGTH", 1800),
+            target_char_min=getattr(settings, "PROPOSAL_TARGET_CHAR_MIN", 700),
+            target_char_max=getattr(settings, "PROPOSAL_TARGET_CHAR_MAX", 1200),
             validate_before_return=True,
             fallback_enabled=True,
             model=getattr(settings, "LLM_MODEL", "gpt-4o-mini"),
@@ -179,7 +223,6 @@ class DefaultProposalValidator:
         tech_keywords = [
             "python",
             "fastapi",
-            "n8n",
             "api",
             "automation",
             "workflow",
@@ -193,13 +236,13 @@ class DefaultProposalValidator:
             if keyword_count / len(words) > 0.35:
                 issues.append("关键词堆砌过密（缺乏自然表达）")
 
-        # 4. 与项目描述的匹配度检查
+        # 4. 与项目描述的匹配度检查（放宽限制：从3个降低到2个共同词）
         project_desc = (project.get("description") or "").lower()
         if project_desc:
             title_words = set((project.get("title", "") or "").lower().split())
             proposal_words = set(proposal_lower.split())
             common_words = title_words & proposal_words
-            if len(common_words) < 3 and len(title_words) > 5:
+            if len(common_words) < 2 and len(title_words) > 5:
                 issues.append("与项目描述关联度低（缺乏针对性）")
 
         # 5. 结构化检查（是否包含技术方案、交付计划）
@@ -236,13 +279,37 @@ class DefaultProposalValidator:
         if duplicate_count >= 2 and len(sentences) > 3:
             issues.append(f"存在重复句式 ({duplicate_count}处)")
 
-        # 7. 检查是否为空行或仅包含特殊字符
+        # 7. 检查是否为空行或仅包含特殊字符（放宽限制：从30%提高到50%）
         lines = proposal.split("\n")
         empty_lines = sum(
             1 for line in lines if not line.strip() or re.match(r"^[\s\t\xA0]+$", line)
         )
-        if empty_lines > len(lines) * 0.3:
+        if empty_lines > len(lines) * 0.5:
             issues.append(f"空行过多（{empty_lines}/{len(lines)}）")
+
+        # 8. 项目关键锚点覆盖检查（防止泛化文案）
+        anchors = self._extract_project_anchor_terms(project)
+        if anchors:
+            min_required_hits = 1 if len(anchors) <= 2 else 2
+            hit_count = self._count_anchor_hits(proposal_lower, anchors)
+            if hit_count < min_required_hits:
+                issues.append(
+                    "关键需求点覆盖不足"
+                    f"（命中 {hit_count}/{min_required_hits}，候选: {', '.join(anchors[:4])}）"
+                )
+
+        # 9. 报价一致性检查（仅在存在 expected_bid_amount 时生效）
+        expected_bid = project.get("expected_bid_amount")
+        if expected_bid is not None:
+            quote_candidates = self._extract_quote_candidates(proposal)
+            if quote_candidates:
+                expected = float(expected_bid)
+                tolerance = max(1.0, expected * 0.12)
+                if not any(abs(v - expected) <= tolerance for v in quote_candidates):
+                    issues.append(
+                        "报价与当前投标金额不一致"
+                        f"（expected={expected:.2f}, found={quote_candidates[:3]}）"
+                    )
 
         return len(issues) == 0, issues
 
@@ -251,6 +318,111 @@ class DefaultProposalValidator:
 
     def get_max_length(self) -> int:
         return self.max_length
+
+    def _extract_project_anchor_terms(self, project: Dict[str, Any]) -> List[str]:
+        project_text = " ".join(
+            [
+                str(project.get("title", "") or ""),
+                str(project.get("description", "") or ""),
+                str(project.get("preview_description", "") or ""),
+            ]
+        ).lower()
+
+        anchors: List[str] = []
+        for markers, label in _PROJECT_REQUIREMENT_HINTS:
+            if any(marker in project_text for marker in markers):
+                anchors.append(label)
+
+        if anchors:
+            return anchors[:6]
+
+        # Fallback: title keywords
+        raw_title = str(project.get("title", "") or "").lower()
+        stop_words = {
+            "with",
+            "for",
+            "and",
+            "the",
+            "task",
+            "project",
+            "build",
+            "need",
+            "from",
+            "using",
+            "into",
+            "your",
+            "this",
+        }
+        tokens = re.findall(r"[a-z][a-z0-9#+-]{3,}", raw_title)
+        deduped: List[str] = []
+        for token in tokens:
+            if token in stop_words or token in deduped:
+                continue
+            deduped.append(token)
+        return deduped[:3]
+
+    def _count_anchor_hits(self, proposal_lower: str, anchors: List[str]) -> int:
+        hits = 0
+        for anchor in anchors:
+            if "/" in anchor:
+                parts = [p.strip() for p in anchor.split("/") if p.strip()]
+                if any(part in proposal_lower for part in parts):
+                    hits += 1
+                continue
+            if anchor in proposal_lower:
+                hits += 1
+                continue
+
+            # Phrase fallback: allow partial token coverage for labels like
+            # "whatsapp integration" even when proposal says "whatsapp webhook".
+            tokens = re.findall(r"[a-z0-9+#-]{3,}", anchor.lower())
+            stop_words = {"with", "for", "and", "the", "task", "project"}
+            tokens = [token for token in tokens if token not in stop_words]
+            if not tokens:
+                continue
+            token_hits = sum(1 for token in tokens if token in proposal_lower)
+            min_hits = 1 if len(tokens) <= 2 else 2
+            if token_hits >= min_hits:
+                hits += 1
+        return hits
+
+    def _extract_quote_candidates(self, proposal: str) -> List[float]:
+        text = proposal or ""
+        values: List[float] = []
+        for pattern in _QUOTE_NUMBER_PATTERNS:
+            for match in pattern.finditer(text):
+                parsed = self._safe_float(match.group(1))
+                if parsed is None:
+                    continue
+                values.append(parsed)
+
+        if not values:
+            for segment in _BUDGET_CONTEXT_PATTERN.finditer(text):
+                for m in _NUMERIC_PATTERN.finditer(segment.group(0)):
+                    parsed = self._safe_float(m.group(0))
+                    if parsed is None:
+                        continue
+                    values.append(parsed)
+
+        if not values:
+            for match in _LEGACY_QUOTE_NUMBER_PATTERN.finditer(text):
+                parsed = self._safe_float(match.group(1))
+                if parsed is None:
+                    continue
+                values.append(parsed)
+
+        deduped: List[float] = []
+        for value in values:
+            if any(abs(value - existing) < 0.01 for existing in deduped):
+                continue
+            deduped.append(value)
+        return deduped
+
+    def _safe_float(self, raw: str) -> Optional[float]:
+        try:
+            return float((raw or "").replace(",", ""))
+        except Exception:
+            return None
 
 
 class DefaultPersonaController:
@@ -372,7 +544,14 @@ class LLMClientProtocol(Protocol):
 class OpenAILLMClientAdapter:
     """OpenAI LLM 客户端适配器"""
 
-    def __init__(self, api_key: str, model: str, base_url: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: Optional[str] = None,
+        timeout: Optional[float] = None,
+        provider_name: str = "openai",
+    ):
         if not api_key:
             raise ValueError("Missing LLM_API_KEY")
         if not model:
@@ -381,13 +560,18 @@ class OpenAILLMClientAdapter:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url
+        self._provider_name = provider_name
 
         try:
             from openai import AsyncOpenAI
         except Exception as e:
             raise RuntimeError(f"OpenAI SDK not available: {e}")
 
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+        )
 
     async def generate_proposal(
         self,
@@ -416,8 +600,76 @@ class OpenAILLMClientAdapter:
             return content
 
         except Exception as e:
-            logger.error(f"OpenAI proposal generation failed: {e}")
+            logger.error(
+                "Proposal generation failed via provider=%s model=%s: %s",
+                self._provider_name,
+                model,
+                e,
+            )
             raise
+
+
+class MultiProviderLLMClientAdapter:
+    """多 Provider 回退适配器：按顺序尝试，直到成功。"""
+
+    def __init__(
+        self,
+        providers: List[Dict[str, Any]],
+        default_model: str,
+        timeout: Optional[float] = None,
+    ):
+        self._clients: List[Tuple[str, str, OpenAILLMClientAdapter]] = []
+
+        for provider in providers:
+            name = str(provider.get("name") or "").strip().lower()
+            api_key = str(provider.get("api_key") or "").strip()
+            model = str(provider.get("model") or default_model).strip() or default_model
+            base_url = provider.get("base_url")
+
+            if not name or not api_key:
+                continue
+
+            client = OpenAILLMClientAdapter(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                timeout=timeout,
+                provider_name=name,
+            )
+            self._clients.append((name, model, client))
+
+        if not self._clients:
+            raise ValueError("No valid LLM providers configured for proposal generation.")
+
+    async def generate_proposal(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        temperature: float,
+    ) -> str:
+        errors: List[str] = []
+
+        for name, provider_model, client in self._clients:
+            try:
+                # 优先使用 provider 自己的模型，避免主模型不兼容
+                return await client.generate_proposal(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    model=provider_model or model,
+                    temperature=temperature,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Proposal provider failed, trying next: provider=%s error=%s",
+                    name,
+                    exc,
+                )
+                errors.append(f"{name}: {exc}")
+                continue
+
+        raise RuntimeError("All proposal LLM providers failed: " + " | ".join(errors))
 
 
 class ProposalService:
@@ -464,18 +716,42 @@ class ProposalService:
         if llm_client is not None:
             self.llm_client = llm_client
         else:
-            api_key = getattr(settings, "LLM_API_KEY", "")
-            model = self.config.model
-            base_url = getattr(settings, "LLM_BASE_URL", None)
-            self.llm_client = OpenAILLMClientAdapter(
-                api_key=api_key,
-                model=model,
-                base_url=base_url,
-            )
+            self.llm_client = self._build_default_llm_client()
 
         logger.info(
             f"ProposalService initialized with model={self.config.model}, "
             f"max_retries={self.config.max_retries}"
+        )
+
+    def _build_default_llm_client(self) -> LLMClientProtocol:
+        """根据 settings 自动构建默认 LLM 客户端（支持 provider 回退）。"""
+        configured = settings.get_enabled_llm_providers()
+        primary = str(getattr(settings, "LLM_PROVIDER", "openai")).strip().lower()
+
+        # 按 primary provider 排序，保持其余 provider 的原顺序
+        providers = list(configured)
+        providers.sort(key=lambda p: 0 if str(p.get("name", "")).lower() == primary else 1)
+
+        if providers:
+            return MultiProviderLLMClientAdapter(
+                providers=providers,
+                default_model=self.config.model,
+                timeout=self.config.timeout,
+            )
+
+        # 兼容旧配置：仅使用 LLM_API_KEY + LLM_MODEL + LLM_API_URL
+        api_key = getattr(settings, "LLM_API_KEY", "")
+        model = getattr(settings, "LLM_MODEL", self.config.model)
+        base_url = getattr(settings, "LLM_API_URL", None) or getattr(
+            settings, "LLM_BASE_URL", None
+        )
+
+        return OpenAILLMClientAdapter(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=self.config.timeout,
+            provider_name=primary or "openai",
         )
 
     async def generate_proposal(
@@ -483,6 +759,7 @@ class ProposalService:
         project: Project,
         score_data: Optional[Dict[str, Any]] = None,
         max_retries: Optional[int] = None,
+        db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """
         生成提案
@@ -493,6 +770,7 @@ class ProposalService:
             project: 项目对象
             score_data: 可选的评分数据
             max_retries: 最大重试次数（覆盖配置）
+            db: 可选的数据库会话
 
         Returns:
             {
@@ -511,24 +789,35 @@ class ProposalService:
 
         # 转换项目为字典
         project_dict = self._project_to_dict(project)
+        validation_project = dict(project_dict)
+        if score_data and score_data.get("suggested_bid") is not None:
+            try:
+                validation_project["expected_bid_amount"] = float(
+                    score_data.get("suggested_bid")
+                )
+            except Exception:
+                pass
 
         # 获取人设信息
-        persona = self.persona_controller.get_persona_for_project(project_dict)
+        persona = self.persona_controller.get_persona_for_project(validation_project)
 
         # 构建提示词
+        if db:
+            self.prompt_builder.fetch_prompts(db)
+
         system_prompt = self.prompt_builder.build_prompt(
-            project=project_dict,
+            project=validation_project,
             style="narrative",
             structure="three_step",
         )
 
         # 根据人设调整风格
         system_prompt = self.persona_controller.adjust_style(
-            system_prompt, project_dict
+            system_prompt, validation_project
         )
 
         # 构建用户提示词
-        user_prompt = self._build_user_prompt(project_dict, score_data, persona)
+        user_prompt = self._build_user_prompt(validation_project, score_data, persona)
 
         logger.info(f"Generating proposal for project {project.freelancer_id}")
 
@@ -541,9 +830,52 @@ class ProposalService:
                     user_prompt=user_prompt,
                 )
 
+                # 强制英文输出：不做翻译，只允许直接英文生成
+                if self._contains_cjk_characters(proposal):
+                    language_issue = "proposal_not_english"
+                    if attempt < effective_max_retries - 1:
+                        system_prompt = self._enhance_prompt_for_english_only(
+                            system_prompt
+                        )
+                        continue
+                    return self._create_result(
+                        success=False,
+                        proposal="",
+                        attempts=attempt + 1,
+                        validation_passed=False,
+                        validation_issues=[language_issue],
+                        model=self.config.model,
+                        start_time=start_time,
+                        error=language_issue,
+                    )
+
+                # 若超出目标长度，自动执行一次压缩重写（保持英文直出，不走翻译）
+                if len(proposal) > self.config.target_char_max:
+                    compressed = await self._compress_proposal_to_target_length(
+                        proposal=proposal,
+                        project=validation_project,
+                    )
+                    if compressed:
+                        proposal = compressed
+
+                    # 压缩后仍过长，则进入下一次重试并强化长度约束
+                    if (
+                        len(proposal) > self.config.target_char_max
+                        and attempt < effective_max_retries - 1
+                    ):
+                        system_prompt = self._enhance_prompt_with_feedback(
+                            system_prompt,
+                            [
+                                f"提案过长（{len(proposal)} > {self.config.target_char_max} 字符）",
+                                "请在保留技术可信度的前提下显著压缩篇幅。",
+                            ],
+                            persona,
+                        )
+                        continue
+
                 # 验证提案
                 if self.config.validate_before_return:
-                    valid, issues = self._validate_proposal(proposal, project_dict)
+                    valid, issues = self._validate_proposal(proposal, validation_project)
                     if not valid:
                         logger.warning(
                             f"Proposal validation failed for project {project.freelancer_id}: {issues}"
@@ -556,16 +888,16 @@ class ProposalService:
                             )
                             continue
                         else:
-                            # 最后一次尝试，返回带警告的提案
+                            # 最后一次尝试仍未通过验证：返回失败，禁止带病继续流程
                             return self._create_result(
-                                success=True,
-                                proposal=proposal,
+                                success=False,
+                                proposal="",
                                 attempts=attempt + 1,
                                 validation_passed=False,
                                 validation_issues=issues,
                                 model=self.config.model,
                                 start_time=start_time,
-                                error=None,
+                                error="proposal_validation_failed",
                             )
 
                 # 验证通过
@@ -630,11 +962,14 @@ class ProposalService:
         Returns:
             生成的提案文本
         """
-        return await self.llm_client.generate_proposal(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=self.config.model,
-            temperature=self.config.temperature,
+        return await asyncio.wait_for(
+            self.llm_client.generate_proposal(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=self.config.model,
+                temperature=self.config.temperature,
+            ),
+            timeout=self.config.timeout,
         )
 
     def _build_user_prompt(
@@ -654,36 +989,105 @@ class ProposalService:
         Returns:
             用户提示词
         """
-        prompt_parts = []
+        prompt_parts = ["Generate the bid proposal directly in English only."]
+        prompt_parts.append(
+            "Use exactly 4 short paragraphs: technical approach, implementation details, delivery+budget, and one clarifying question."
+        )
+        prompt_parts.append(
+            "Include at least two of these words naturally: technical, implementation, delivery, plan, approach, solution."
+        )
+        prompt_parts.append(
+            "Include the word budget and add a concrete budget/quote discussion sentence."
+        )
 
         # 项目摘要
         title = project.get("title", "未命名项目")
-        prompt_parts.append(f"项目名称：{title}")
+        prompt_parts.append(f"Project title: {title}")
+        requirement_hints = self._extract_project_requirement_hints(project)
+        if requirement_hints:
+            required_items = 1 if len(requirement_hints) < 2 else 2
+            prompt_parts.append(
+                "Project-specific mandatory coverage: "
+                + ", ".join(requirement_hints[:6])
+                + "."
+            )
+            prompt_parts.append(
+                f"Mention at least {required_items} mandatory item(s) explicitly in the proposal."
+            )
 
         # 预算信息
         budget_min = project.get("budget_minimum")
         budget_max = project.get("budget_maximum")
         currency = project.get("currency_code", "USD")
         if budget_min is not None and budget_max is not None:
-            prompt_parts.append(f"预算范围：{budget_min}-{budget_max} {currency}")
+            prompt_parts.append(f"Budget range: {budget_min}-{budget_max} {currency}")
 
         # 预估工时和报价（如果有）
         if score_data:
             if score_data.get("estimated_hours"):
-                prompt_parts.append(f"预估工时：{score_data['estimated_hours']} 小时")
-            if score_data.get("suggested_bid"):
                 prompt_parts.append(
-                    f"建议报价：{score_data['suggested_bid']} {currency}"
+                    f"Estimated hours: {score_data['estimated_hours']} hours"
+                )
+            if score_data.get("suggested_bid"):
+                suggested_bid = float(score_data["suggested_bid"])
+                prompt_parts.append(
+                    f"Suggested bid: {suggested_bid} {currency}"
+                )
+                prompt_parts.append(
+                    f"If you mention a numeric quote, it MUST be exactly {suggested_bid} {currency}. "
+                    "Do not output any other quote amount."
                 )
 
         # 人设调整提示
         tone = persona.get("tone", "professional")
         if tone == "concise":
-            prompt_parts.append("\n请用简洁直接的方式表达，避免冗余。")
+            prompt_parts.append("Use concise and direct wording.")
         elif tone == "highly_professional":
-            prompt_parts.append("\n请使用正式专业的语言风格。")
+            prompt_parts.append("Use a formal and highly professional style.")
+        else:
+            prompt_parts.append("Use a professional and client-focused tone.")
 
         return "\n".join(prompt_parts)
+
+    def _extract_project_requirement_hints(self, project: Dict[str, Any]) -> List[str]:
+        project_text = " ".join(
+            [
+                str(project.get("title", "") or ""),
+                str(project.get("description", "") or ""),
+                str(project.get("preview_description", "") or ""),
+            ]
+        ).lower()
+        hints: List[str] = []
+        for markers, label in _PROJECT_REQUIREMENT_HINTS:
+            if any(marker in project_text for marker in markers):
+                hints.append(label)
+
+        if hints:
+            return hints[:6]
+
+        raw_title = str(project.get("title", "") or "").lower()
+        stop_words = {
+            "with",
+            "for",
+            "and",
+            "the",
+            "task",
+            "project",
+            "build",
+            "need",
+            "from",
+            "using",
+            "into",
+            "your",
+            "this",
+        }
+        tokens = re.findall(r"[a-z][a-z0-9#+-]{3,}", raw_title)
+        fallback: List[str] = []
+        for token in tokens:
+            if token in stop_words or token in fallback:
+                continue
+            fallback.append(token)
+        return fallback[:3]
 
     def _enhance_prompt_with_feedback(
         self,
@@ -702,13 +1106,78 @@ class ProposalService:
         Returns:
             增强后的提示词
         """
-        enhancement = "\n\n### 改进要求（上次生成未通过验证）：\n"
+        enhancement = "\n\n### Improvement Required (previous attempt failed validation):\n"
         for issue in feedback:
             enhancement += f"- {issue}\n"
 
-        enhancement += "\n请根据以上反馈改进提案，确保质量达标。"
+        enhancement += "\nPlease improve the proposal based on the feedback above to meet quality standards."
 
         return base_prompt + enhancement
+
+    def _enhance_prompt_for_english_only(self, base_prompt: str) -> str:
+        """
+        Add explicit language constraint when non-English output is detected.
+        """
+        enhancement = (
+            "\n\n### Language Correction Requirement:\n"
+            "The previous output was not in English.\n"
+            "Regenerate the entire proposal in English only.\n"
+            "Do not output any Chinese text.\n"
+            "Do not translate from an already written Chinese draft.\n"
+            "Write directly in English from the first sentence."
+        )
+        return base_prompt + enhancement
+
+    def _contains_cjk_characters(self, text: str) -> bool:
+        """Detect whether output still contains CJK characters."""
+        if not text:
+            return False
+        return bool(_CJK_PATTERN.search(text))
+
+    async def _compress_proposal_to_target_length(
+        self, proposal: str, project: Dict[str, Any]
+    ) -> str:
+        """
+        Rewrite long proposal into configured target character range.
+
+        Returns the rewritten proposal; if rewrite fails, returns original proposal.
+        """
+        target_min = max(200, int(self.config.target_char_min))
+        target_max = max(target_min + 50, int(self.config.target_char_max))
+        if len(proposal) <= target_max:
+            return proposal
+
+        title = project.get("title", "the project")
+        rewrite_system_prompt = (
+            "You are an expert bid editor.\n"
+            "Rewrite the given proposal into concise, high-conviction English.\n"
+            f"Target length: {target_min}-{target_max} characters.\n"
+            "Do not use Chinese.\n"
+            "Keep project specificity and technical credibility.\n"
+            "Include at least two of these words naturally: technical, implementation, delivery, plan, approach, solution.\n"
+            "Include the word budget and one concrete budget/quote sentence.\n"
+            "End with one concise clarifying question.\n"
+            "Output only the final rewritten proposal."
+        )
+        expected_bid = project.get("expected_bid_amount")
+        currency = project.get("currency_code", "USD")
+        if expected_bid is not None:
+            rewrite_system_prompt += (
+                f"\nIf you mention a numeric quote, it MUST be exactly {float(expected_bid)} {currency}."
+            )
+        rewrite_user_prompt = (
+            f"Project title: {title}\n\n"
+            "Original proposal:\n"
+            f"{proposal}"
+        )
+        try:
+            rewritten = (await self._call_llm(rewrite_system_prompt, rewrite_user_prompt)).strip()
+            if not rewritten:
+                return proposal
+            return rewritten
+        except Exception:
+            logger.warning("Proposal compression rewrite failed; using original long proposal.")
+            return proposal
 
     def _project_to_dict(self, project: Project) -> Dict[str, Any]:
         """
@@ -815,6 +1284,10 @@ class ProposalService:
 
         return ""
 
+    def generate_fallback_proposal(self, project: Project) -> str:
+        """Generate fallback proposal directly without calling LLM."""
+        return self._generate_fallback_proposal(project)
+
     def _generate_fallback_proposal(self, project: Project) -> str:
         """
         生成备用提案（模板化）
@@ -826,19 +1299,33 @@ class ProposalService:
             备用提案文本
         """
         title = project.title or "本项目"
-        description = project.description or ""
+        budget_min = float(project.budget_minimum) if project.budget_minimum else None
+        budget_max = float(project.budget_maximum) if project.budget_maximum else None
+        currency = project.currency_code or "USD"
+        suggested_bid = float(project.suggested_bid) if project.suggested_bid else None
+        quote = suggested_bid or budget_max or budget_min
 
-        # 简单模板
-        return f"""基于您发布的项目需求，我对{title}有以下理解和方案：
+        budget_line = (
+            "Budget is not fully defined yet; I will confirm scope first and then finalize the quote."
+        )
+        if budget_min is not None and budget_max is not None:
+            budget_line = (
+                f"Budget range: {budget_min:.0f}-{budget_max:.0f} {currency}. "
+                f"My quote: {(quote or budget_max):.0f} {currency}."
+            )
+        elif budget_max is not None:
+            budget_line = (
+                f"Budget cap: {budget_max:.0f} {currency}. "
+                f"My quote: {(quote or budget_max):.0f} {currency}."
+            )
 
-我是一名经验丰富的开发者，对您描述的{title}有深入理解。
+        return f"""For {title}, here is the practical execution plan.
 
-我的技术方案：
-- 仔细分析了项目需求和交付标准
-- 制定了详细的开发计划和里程碑
-- 确保代码质量和可维护性
+I will start with scope decomposition, data and interface mapping, and clear acceptance criteria so delivery boundaries are explicit from day one. Then I will implement each module with robust validation and exception handling to keep the solution stable under real usage.
 
-期待与您进一步沟通具体细节。"""
+Delivery will proceed in three phases: scope confirmation and sample validation, core implementation and integration, and final quality review with fixes plus handover documentation. This keeps progress transparent and lowers project risk.
+
+{budget_line} If you confirm the target scope, I can start immediately and follow this plan to deliver on time."""
 
 
 # ============================================================================

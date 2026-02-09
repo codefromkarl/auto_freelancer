@@ -43,7 +43,9 @@ class Settings(BaseSettings):
 
     # Anthropic Claude 配置
     ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_AUTH_TOKEN: str = ""
     ANTHROPIC_MODEL: str = "claude-3-5-sonnet-20241022"
+    ANTHROPIC_BASE_URL: Optional[str] = None
     ANTHROPIC_ENABLED: bool = False
 
     # DeepSeek 配置
@@ -57,6 +59,15 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gpt-4o-mini"
     LLM_API_URL: Optional[str] = None
     LLM_SCORING_MODE: str = "ensemble"
+
+    # Proposal generation configuration
+    # Character-based limits are tuned from real Freelancer bid samples.
+    PROPOSAL_MAX_RETRIES: int = 3
+    PROPOSAL_TIMEOUT: float = 60.0
+    PROPOSAL_MIN_LENGTH: int = 280
+    PROPOSAL_MAX_LENGTH: int = 1800
+    PROPOSAL_TARGET_CHAR_MIN: int = 700
+    PROPOSAL_TARGET_CHAR_MAX: int = 1200
 
     # Database Configuration
     DATABASE_PATH: str = "/app/data/freelancer.db"
@@ -85,7 +96,6 @@ class Settings(BaseSettings):
     # Business Logic Configuration
     DEFAULT_SKILLS: List[str] = [
         "python",
-        "n8n",
         "automation",
         "api",
         "webhook",
@@ -141,13 +151,16 @@ class Settings(BaseSettings):
     }
 
     # 初筛阈值
-    MIN_BUDGET_THRESHOLD: float = 20.0  # 最低预算阈值 (USD)
+    MIN_BUDGET_THRESHOLD: float = 5.0  # 最低预算阈值 (USD)，保留小单机会
     MIN_DESCRIPTION_LENGTH: int = 30  # 最小描述长度
     ALLOWED_STATUSES: List[str] = [
         "active",
         "open",
         "open_for_bidding",
     ]  # 允许的项目状态
+
+    # 投标选择策略：newcomer(新手优先拿首单) / balanced(均衡)
+    BID_SELECTION_PROFILE: str = "newcomer"
 
     # Project Kick-off Automation (方向六：中标后的"瞬间启动"工作流)
     KICKOFF_REPO_PROVIDER: str = "github"  # github, gitlab
@@ -229,11 +242,19 @@ class Settings(BaseSettings):
                 "model": self.ZHIPU_MODEL,
             })
 
-        if self.ANTHROPIC_ENABLED and self.ANTHROPIC_API_KEY:
+        anthropic_key = self.ANTHROPIC_API_KEY or self.ANTHROPIC_AUTH_TOKEN
+        anthropic_base_url = self.ANTHROPIC_BASE_URL
+        if anthropic_base_url:
+            if "chat/completions" in anthropic_base_url:
+                anthropic_base_url = anthropic_base_url.replace("chat/completions", "")
+            if anthropic_base_url.endswith("/"):
+                anthropic_base_url = anthropic_base_url[:-1]
+
+        if self.ANTHROPIC_ENABLED and anthropic_key:
             providers.append({
                 "name": "anthropic",
-                "api_key": self.ANTHROPIC_API_KEY,
-                "base_url": None,
+                "api_key": anthropic_key,
+                "base_url": anthropic_base_url,
                 "model": self.ANTHROPIC_MODEL,
             })
 

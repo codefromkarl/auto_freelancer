@@ -1,0 +1,54 @@
+{
+  "version": "2026-02-07",
+  "notes": "Derived from real bid examples in laundry admin + POS frontend projects. Use for structure/tone reference only; never copy verbatim.",
+  "samples": [
+    {
+      "id": "zawn_balanced_architecture",
+      "author": "ZAWN Tech",
+      "style_tags": ["structured", "technical", "milestone-oriented"],
+      "length_chars_range": "900-1500",
+      "length_words_range": "150-240",
+      "strengths": [
+        "Clearly separates Admin MVP and POS MVP scope",
+        "Mentions API wiring, state handling, printer-ready layouts",
+        "Ends with concrete discovery questions"
+      ]
+    },
+    {
+      "id": "asif_timeline_driven",
+      "author": "Asif A.",
+      "style_tags": ["concise", "execution-focused", "timeline-first"],
+      "length_chars_range": "600-1000",
+      "length_words_range": "100-170",
+      "strengths": [
+        "Provides phase-by-phase milestone timeline",
+        "Includes printer integration and QA phase",
+        "Mentions offline queueing via PWA"
+      ]
+    },
+    {
+      "id": "hercules_performance_focus",
+      "author": "Hercules S.",
+      "style_tags": ["architect-level", "risk-focused", "performance-aware"],
+      "length_chars_range": "700-1200",
+      "length_words_range": "120-200",
+      "strengths": [
+        "Identifies latency and sync as key POS risks",
+        "Explains design rationale for reliable workflows",
+        "Covers kiosk/PWA/Electron extension paths"
+      ]
+    },
+    {
+      "id": "bryce_solution_narrative",
+      "author": "Bryce",
+      "style_tags": ["consultative", "clean narrative", "scope-complete"],
+      "length_chars_range": "800-1300",
+      "length_words_range": "130-220",
+      "strengths": [
+        "Full coverage of admin + POS functional scope",
+        "Highlights React state and API integration strategy",
+        "Uses polished business-facing language"
+      ]
+    }
+  ]
+}

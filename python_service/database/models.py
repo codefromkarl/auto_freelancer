@@ -15,6 +15,7 @@ class Project(Base):
     freelancer_id = Column(Integer, unique=True, nullable=False, index=True)
     title = Column(String(500), nullable=False)
     description = Column(Text)
+    full_description = Column(Text, nullable=True)
     preview_description = Column(Text)
     budget_minimum = Column(DECIMAL(10, 2))
     budget_maximum = Column(DECIMAL(10, 2))
@@ -32,7 +33,7 @@ class Project(Base):
     bid_stats = Column(Text)  # JSON: {bid_count: N, ...}
     owner_info = Column(Text)  # JSON: {online_status, jobs_posted, rating, ...}
 
-    ai_score = Column(Float)  # AI analysis score (0-1.9)
+    ai_score = Column(Float)  # AI analysis score (0-10)
     ai_reason = Column(Text)  # AI analysis reason
     ai_proposal_draft = Column(Text)  # AI generated proposal
     suggested_bid = Column(DECIMAL(10, 2))  # AI suggested bid amount in USD
@@ -44,14 +45,26 @@ class Project(Base):
     # Relationships
     bids = relationship("Bid", back_populates="project", foreign_keys="[Bid.project_id]")
     milestones = relationship("Milestone", back_populates="project", foreign_keys="[Milestone.project_id]")
+    competitor_bids = relationship("CompetitorBid", foreign_keys="[CompetitorBid.project_id]")
 
     def to_dict(self):
         """Convert model to dictionary."""
         import json
+        # Helper to safely parse JSON fields
+        def safe_json_parse(data):
+            if not data:
+                return None
+            try:
+                return json.loads(data)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # Return raw string if JSON parsing fails
+                return data
+
         return {
             "id": self.freelancer_id,
             "title": self.title,
             "description": self.description,
+            "full_description": self.full_description,
             "preview_description": self.preview_description,
             "budget_minimum": float(self.budget_minimum) if self.budget_minimum else None,
             "budget_maximum": float(self.budget_maximum) if self.budget_maximum else None,
@@ -61,8 +74,8 @@ class Project(Base):
             "skills": self.skills,
             "owner_id": self.owner_id,
             "deadline": self.deadline,
-            "bid_stats": json.loads(self.bid_stats) if self.bid_stats else None,
-            "owner_info": json.loads(self.owner_info) if self.owner_info else None,
+            "bid_stats": safe_json_parse(self.bid_stats),
+            "owner_info": safe_json_parse(self.owner_info),
             "ai_score": self.ai_score,
             "ai_reason": self.ai_reason,
             "ai_proposal_draft": self.ai_proposal_draft,
@@ -108,6 +121,43 @@ class Bid(Base):
             "status": self.status,
             "submitdate": self.submitdate,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CompetitorBid(Base):
+    """Competitor bids table for storing other bidders' data on a project."""
+    __tablename__ = "competitor_bids"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bid_id = Column(Integer, unique=True, nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    project_freelancer_id = Column(Integer, ForeignKey("projects.freelancer_id"), nullable=False, index=True)
+    bidder_id = Column(Integer, nullable=False)
+    amount = Column(DECIMAL(10, 2))
+    period = Column(Integer)          # Duration in days
+    retracted = Column(Boolean, default=False)
+    award_status = Column(String(20))  # pending/awarded/rejected
+    reputation = Column(Float)         # Bidder reputation score
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    project = relationship("Project", foreign_keys=[project_id], overlaps="competitor_bids")
+
+    Index("idx_competitor_bids_project", "project_id")
+    Index("idx_competitor_bids_bidder", "bidder_id")
+
+    def to_dict(self):
+        """Convert model to dictionary."""
+        return {
+            "bid_id": self.bid_id,
+            "project_id": self.project_freelancer_id,
+            "bidder_id": self.bidder_id,
+            "amount": float(self.amount) if self.amount else None,
+            "period": self.period,
+            "retracted": self.retracted,
+            "award_status": self.award_status,
+            "reputation": self.reputation,
+            "fetched_at": self.fetched_at.isoformat() if self.fetched_at else None,
         }
 
 
@@ -568,4 +618,69 @@ class ProjectKickoff(Base):
             "triggered_at": self.triggered_at.isoformat() if self.triggered_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# =============================================================================
+# Configuration Models (System Settings)
+# =============================================================================
+
+class ScoringRule(Base):
+    """
+    Scoring rules configuration table.
+    Stores weights and descriptions for project scoring algorithms.
+    """
+    __tablename__ = "scoring_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True)
+    description = Column(Text)
+    weight = Column(Float, default=1.0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        """Convert model to dictionary."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "weight": self.weight,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PromptTemplate(Base):
+    """
+    Prompt templates for LLM interactions.
+    Stores system prompts for different categories (scoring, proposal, messaging).
+    """
+    __tablename__ = "prompt_templates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False, index=True)  # scoring, proposal, message, general
+    content = Column(Text, nullable=False)
+    variables = Column(Text)  # JSON list of variables
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    Index("idx_prompts_category", "category")
+
+    def to_dict(self):
+        """Convert model to dictionary."""
+        import json
+        return {
+            "id": self.id,
+            "name": self.name,
+            "category": self.category,
+            "content": self.content,
+            "variables": json.loads(self.variables) if self.variables else [],
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

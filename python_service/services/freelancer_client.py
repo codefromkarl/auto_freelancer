@@ -27,6 +27,7 @@ import re
 import aiohttp
 import asyncio
 import time
+import requests as _requests
 
 from config import settings
 
@@ -239,7 +240,7 @@ class FreelancerClient:
             "Accept": "application/json, text/plain, */*",
         }
 
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession(headers=headers, trust_env=False) as session:
             last_error: Optional[str] = None
             for url in urls:
                 try:
@@ -323,7 +324,8 @@ class FreelancerClient:
         budget_max: Optional[float] = None,
         status: Optional[str] = None,
         limit: int = 20,
-        offset: int = 0
+        offset: int = 0,
+        newest_first: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Search projects with advanced filters.
@@ -337,6 +339,10 @@ class FreelancerClient:
                 search_filter['min_avg_price'] = budget_min
             if budget_max is not None:
                 search_filter['max_avg_price'] = budget_max
+            if newest_first:
+                # Ask API to return newest projects first when supported.
+                search_filter['sort_field'] = 'submitdate'
+                search_filter['sort_direction'] = 'desc'
             if status == 'active':
                 active_only = True
             else:
@@ -345,23 +351,35 @@ class FreelancerClient:
             logger.info(f"Searching projects: query='{query}', filter={search_filter}")
 
             loop = asyncio.get_running_loop()
-            
-            # Run blocking SDK call in executor
-            result = await loop.run_in_executor(
-                None,
-                lambda: search_projects(
-                    self.session,
-                    query=query,
-                    search_filter=search_filter,
-                    limit=limit,
-                    offset=offset,
-                    active_only=active_only
+
+            # Run blocking SDK call in executor with timeout
+            try:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: search_projects(
+                            self.session,
+                            query=query,
+                            search_filter=search_filter,
+                            limit=limit,
+                            offset=offset,
+                            active_only=active_only
+                        )
+                    ),
+                    timeout=30.0,
                 )
-            )
+            except asyncio.TimeoutError:
+                raise FreelancerAPIError(
+                    message=f"Search projects timed out after 30s for query='{query}'",
+                    status_code=504,
+                )
 
             # result is usually a dictionary with 'projects', 'users', etc.
             if isinstance(result, dict):
-                return result.get('projects', [])
+                projects = result.get('projects', [])
+                if newest_first:
+                    projects = self._sort_projects_by_submitdate_desc(projects)
+                return projects
             return []
 
         except Exception as e:
@@ -370,6 +388,45 @@ class FreelancerClient:
                 message=f"Failed to search projects: {str(e)}",
                 status_code=500
             )
+
+    @staticmethod
+    def _parse_submitdate_to_ts(raw_submitdate: Any) -> int:
+        """Best-effort parse for submitdate into unix timestamp. Invalid values become -1."""
+        if raw_submitdate is None:
+            return -1
+
+        if isinstance(raw_submitdate, (int, float)):
+            ts = int(raw_submitdate)
+            if ts > 10_000_000_000:
+                ts //= 1000
+            return ts if ts > 0 else -1
+
+        raw = str(raw_submitdate).strip()
+        if not raw:
+            return -1
+
+        if raw.isdigit():
+            ts = int(raw)
+            if ts > 10_000_000_000:
+                ts //= 1000
+            return ts if ts > 0 else -1
+
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return int(parsed.timestamp())
+        except Exception:
+            return -1
+
+    def _sort_projects_by_submitdate_desc(
+        self,
+        projects: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Sort projects by submitdate descending as a fallback when API ordering is unstable."""
+        return sorted(
+            projects,
+            key=lambda item: self._parse_submitdate_to_ts(item.get("submitdate")),
+            reverse=True,
+        )
 
     async def get_project(
         self,
@@ -395,15 +452,24 @@ class FreelancerClient:
 
             # Run blocking SDK call in executor with query params
             # SDK expects named parameters project_details and user_details
-            project = await loop.run_in_executor(
-                None,
-                lambda: get_project_details(
-                    self.session,
-                    project_id,
-                    project_details=project_details,
-                    user_details=user_details
+            try:
+                project = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: get_project_details(
+                            self.session,
+                            project_id,
+                            project_details=project_details,
+                            user_details=user_details
+                        )
+                    ),
+                    timeout=30.0,
                 )
-            )
+            except asyncio.TimeoutError:
+                raise FreelancerAPIError(
+                    message=f"Get project {project_id} timed out after 30s",
+                    status_code=504,
+                )
 
             return project
         except Exception as e:
@@ -458,7 +524,7 @@ class FreelancerClient:
                     logger.debug(f"Failed to fetch from {url}: {e}")
                 return None
 
-            async with aiohttp.ClientSession(headers=headers) as session:
+            async with aiohttp.ClientSession(headers=headers, trust_env=False) as session:
                 tasks = [fetch_json(session, url) for url in urls]
                 results = await asyncio.gather(*tasks)
 
@@ -516,22 +582,17 @@ class FreelancerClient:
         Returns:
             Bid creation result
 
-        Note: Uses direct requests API instead of SDK to fix bidder_id type issues (REF-007)
+        Note: Uses aiohttp to avoid blocking the event loop (REF-007)
         """
         try:
             logger.info(f"Creating bid for project {project_id}, amount: {amount}, period: {period}, user_id: {self.user_id}")
 
-            # 直接使用 requests 库绕过 SDK 类型问题
-            import requests as req_module
-
-            # 构建投标 URL - 使用当前域名配置
             bid_url = f"{settings.FLN_URL}/api/projects/0.1/bids/"
 
-            # 确保所有数值都是整数类型
             bid_data = {
                 'project_id': int(project_id),
                 'bidder_id': int(self.user_id),
-                'amount': int(amount),
+                'amount': round(float(amount), 2),
                 'period': int(period),
                 'description': description or "",
                 'milestone_percentage': 100
@@ -539,19 +600,28 @@ class FreelancerClient:
 
             logger.info(f"Sending bid data: project_id={bid_data['project_id']}, amount={bid_data['amount']}")
 
-            # 使用同步请求
-            response = req_module.post(
-                bid_url,
-                json=bid_data,
-                headers={
-                    'Freelancer-OAuth-V1': settings.FREELANCER_OAUTH_TOKEN,
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Mozilla/5.0'
-                },
-                timeout=30,
-                verify=True
-            )
+            headers = {
+                'Freelancer-OAuth-V1': settings.FREELANCER_OAUTH_TOKEN,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
 
+            # Use requests (sync) via executor to bypass aiohttp proxy issues
+            loop = asyncio.get_running_loop()
+
+            def _do_post():
+                # Explicitly create session without proxy
+                sess = _requests.Session()
+                sess.trust_env = False
+                resp = sess.post(
+                    bid_url,
+                    json=bid_data,
+                    headers=headers,
+                    timeout=30,
+                )
+                return resp
+
+            response = await loop.run_in_executor(None, _do_post)
             logger.info(f"Response status: {response.status_code}")
 
             if response.status_code == 200:
@@ -565,6 +635,8 @@ class FreelancerClient:
                     status_code=response.status_code
                 )
 
+        except FreelancerAPIError:
+            raise
         except Exception as e:
             logger.error(f"Failed to create bid: {e}")
             raise FreelancerAPIError(
@@ -877,6 +949,107 @@ class FreelancerClient:
                 status_code=500
             )
 
+
+    async def get_project_bids(
+        self,
+        project_id: int,
+        limit: int = 50,
+        offset: int = 0,
+        auto_paginate: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch competitor bids for a project.
+
+        Endpoint: GET {FLN_URL}/api/projects/0.1/projects/{project_id}/bids/
+
+        Args:
+            project_id: Freelancer project ID
+            limit: Results per page (max 50)
+            offset: Starting offset
+            auto_paginate: If True, fetch all pages automatically
+
+        Returns:
+            List of bid dicts from the API
+        """
+        all_bids: List[Dict[str, Any]] = []
+        current_offset = offset
+
+        headers = {
+            "Freelancer-OAuth-V1": settings.FREELANCER_OAUTH_TOKEN,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        }
+
+        loop = asyncio.get_running_loop()
+
+        while True:
+            await self._rate_limiter.acquire()
+
+            url = (
+                f"{settings.FLN_URL}/api/projects/0.1/projects/"
+                f"{project_id}/bids/"
+            )
+            params = {"limit": limit, "offset": current_offset}
+
+            try:
+                def _do_get():
+                    sess = _requests.Session()
+                    sess.trust_env = False
+                    return sess.get(url, params=params, headers=headers, timeout=15)
+
+                resp = await loop.run_in_executor(None, _do_get)
+
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", "5") or "5")
+                    logger.warning(
+                        f"Rate limited fetching bids for project {project_id}, "
+                        f"retry after {retry_after}s"
+                    )
+                    raise FreelancerAPIError(
+                        message="Rate limited",
+                        status_code=429,
+                        retry_after=retry_after,
+                    )
+
+                if resp.status_code != 200:
+                    raise FreelancerAPIError(
+                        message=(
+                            f"Failed to fetch bids for project {project_id} "
+                            f"(HTTP {resp.status_code}): {resp.text[:300]}"
+                        ),
+                        status_code=resp.status_code,
+                    )
+
+                data = resp.json()
+
+            except FreelancerAPIError:
+                raise
+            except Exception as e:
+                logger.error(
+                    f"Error fetching bids for project {project_id}: {e}"
+                )
+                raise FreelancerAPIError(
+                    message=f"Failed to fetch bids: {e}",
+                    status_code=500,
+                )
+
+            # Extract bids from response
+            result = data.get("result", {})
+            bids = result.get("bids", [])
+            if not bids:
+                break
+
+            all_bids.extend(bids)
+
+            if not auto_paginate or len(bids) < limit:
+                break
+
+            current_offset += limit
+
+        logger.info(
+            f"Fetched {len(all_bids)} bids for project {project_id}"
+        )
+        return all_bids
 
     async def get_threads(
         self,

@@ -10,133 +10,154 @@ from database.models import Bid, Project, AuditLog
 from services.freelancer_client import get_freelancer_client, FreelancerAPIError
 from services.proposal_service import get_proposal_service, ProposalService
 
+BIDDABLE_REMOTE_STATUSES = {"open", "active", "open_for_bidding"}
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    """Best-effort int coercion for API fields."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _extract_nested(data: Any, path: Tuple[str, ...]) -> Any:
+    current = data
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _extract_bid_ids(
+    result: Dict[str, Any],
+    fallback_bidder_id: Optional[int] = None,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Extract bid_id and bidder_id from multiple API response shapes."""
+    bid_id_paths = [
+        ("bid_id", "id"),
+        ("bid_id",),
+        ("id",),
+        ("bid", "id"),
+        ("result", "id"),
+        ("result", "bid_id"),
+        ("result", "bid", "id"),
+        ("result", "bid_id", "id"),
+    ]
+    bidder_id_paths = [
+        ("bidder_id", "id"),
+        ("bidder_id",),
+        ("bidder", "id"),
+        ("result", "bidder_id"),
+        ("result", "bidder_id", "id"),
+        ("result", "bidder", "id"),
+        ("result", "bid", "bidder_id"),
+        ("result", "bid", "bidder_id", "id"),
+    ]
+
+    bid_id = None
+    for path in bid_id_paths:
+        value = _coerce_int(_extract_nested(result, path))
+        if value is not None and value > 0:
+            bid_id = value
+            break
+
+    bidder_id = None
+    for path in bidder_id_paths:
+        value = _coerce_int(_extract_nested(result, path))
+        if value is not None and value > 0:
+            bidder_id = value
+            break
+
+    if bidder_id is None and fallback_bidder_id and fallback_bidder_id > 0:
+        bidder_id = fallback_bidder_id
+
+    return bid_id, bidder_id
+
 
 def check_content_risk(description: str, project: Project) -> Tuple[bool, str]:
     """
     检查投标内容的风险
 
+    Delegates to DefaultProposalValidator for DRY compliance.
+    Signature preserved for backward compatibility.
+
     返回: (是否允许, 风险原因)
     """
-    reasons = []
+    from services.proposal_service import DefaultProposalValidator
 
-    # 1. 长度检查
-    if len(description) < 100:
-        reasons.append("描述过短（少于100字符）")
-        return False, "，".join(reasons)
-    if len(description) > 3000:
-        reasons.append("描述过长（超过3000字符）")
-        return False, "，".join(reasons)
+    validator = DefaultProposalValidator(min_length=100, max_length=3000)
+    project_dict = project.to_dict() if hasattr(project, "to_dict") else {
+        "title": project.title,
+        "description": project.description,
+        "preview_description": getattr(project, "preview_description", ""),
+        "budget_minimum": float(project.budget_minimum) if project.budget_minimum else None,
+        "budget_maximum": float(project.budget_maximum) if project.budget_maximum else None,
+        "currency_code": project.currency_code,
+    }
+    is_valid, issues = validator.validate(description, project_dict)
+    if is_valid:
+        return True, "通过"
+    return False, "，".join(issues)
 
-    # 2. AI 模板化内容检测（检测常见AI生成模板）
-    common_phrases = [
-        "我有丰富的经验",
-        "了解您的需求",
-        "这正是我的专长领域",
-        "我可以提供完整的解决方案",
-        "我将仔细分析需求",
-        "包括需求分析、开发、测试和部署",
-        "基于我的相关经验",
-        "作为一名经验丰富的开发者",
-        "我的技术栈包括",
-        "能够快速交付高质量结果",
-    ]
-    common_count = sum(1 for phrase in common_phrases if phrase in description)
-    if common_count >= 3:
-        reasons.append(f"AI 模板化内容过多 ({common_count}处)")
-        return False, "，".join(reasons)
 
-    # 3. 关键词堆砌检测
-    tech_keywords = [
-        "python",
-        "fastapi",
-        "n8n",
-        "api",
-        "automation",
-        "workflow",
-        "django",
-        "flask",
-    ]
-    description_lower = description.lower()
-    words = re.findall(r"\b\w+\b", description_lower)
+def _extract_remote_project_status(
+    remote_project: Dict[str, Any],
+) -> Tuple[str, Optional[str]]:
+    """Extract normalized status/sub_status from different project payload shapes."""
+    payload = remote_project
+    if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+        payload = payload["result"]
+    if not isinstance(payload, dict):
+        return "", None
 
-    # 检查关键词密度（关键词数量 / 总词数）
-    if len(words) > 20:
-        keyword_count = sum(1 for k in tech_keywords if k in description_lower)
-        if keyword_count / len(words) > 0.35:  # 超过35%关键词密度
-            reasons.append("关键词堆砌过密（缺乏自然表达）")
-            return False, "，".join(reasons)
+    status = str(payload.get("status") or "").strip().lower()
+    sub_status = payload.get("sub_status")
+    sub_status_str = str(sub_status).strip().lower() if sub_status is not None else None
+    return status, sub_status_str
 
-    # 4. 与项目描述的匹配度检查
-    project_desc = (project.description or "").lower()
-    if project.title:
-        title_words = set(project.title.lower().split())
-        bid_words = set(description.lower().split())
-        common_words = title_words & bid_words
-        if len(common_words) < 3 and len(title_words) > 5:  # 引用项目词汇太少
-            reasons.append("与项目描述关联度低（缺乏针对性）")
-            return False, "，".join(reasons)
 
-    # 5. 预算合理性检查
-    if project.budget_minimum and project.budget_maximum:
-        avg_budget = (float(project.budget_minimum) + float(project.budget_maximum)) / 2
+async def validate_project_biddable_now(
+    db: Session, project: Project
+) -> Tuple[bool, str]:
+    """
+    Validate project status against live Freelancer API and sync local status.
 
-        # 检查是否提及预算
-        if "预算" not in description_lower and "budget" not in description_lower:
-            reasons.append(
-                f"未提及预算范围 ({project.budget_minimum}-{project.budget_maximum} USD)"
-            )
-            return False, "，".join(reasons)
-
-        # 检查报价是否合理（上下浮动20-30%）
-        suggested = (
-            float(project.suggested_bid) if project.suggested_bid else avg_budget * 0.7
+    Fail-closed: if remote check fails, bidding should be blocked.
+    """
+    client = get_freelancer_client()
+    try:
+        remote = await client.get_project(project.freelancer_id)
+    except Exception as exc:
+        logger.error(
+            "Remote project status check failed. project_id=%s error=%s",
+            project.freelancer_id,
+            exc,
         )
+        return False, f"remote_status_check_failed: {exc}"
 
-        # 注意：这里检查的是"我"句中的数字，不是整体报价
-        amount_match = re.search(r"报价\D*(\d+\.?\d*)", description)
-        if amount_match:
-            quoted_amount = float(amount_match.group(1))
-            if quoted_amount < avg_budget * 0.6 or quoted_amount > avg_budget * 1.3:
-                reasons.append(f"报价异常（{quoted_amount} vs 预算 {avg_budget:.0f}）")
-                return False, "，".join(reasons)
+    status, sub_status = _extract_remote_project_status(remote if isinstance(remote, dict) else {})
+    if status:
+        project.status = status
+    if isinstance(remote, dict):
+        submitdate = remote.get("submitdate")
+        if submitdate is not None:
+            project.submitdate = str(submitdate)
+    project.updated_at = datetime.utcnow()
+    db.flush()  # Let the caller control commit/rollback boundary
 
-    # 6. 结构化检查（是否包含技术方案、交付计划）
-    required_sections = [
-        "方案",
-        "计划",
-        "技术",
-        "实现",
-        "交付",
-        "架构",
-        "plan",
-        "technical",
-        "implementation",
-        "delivery",
-        "architecture",
-        "approach",
-        "solution",
-    ]
-    has_sections = sum(1 for s in required_sections if s.lower() in description.lower())
-    if has_sections < 2:
-        reasons.append("缺乏结构化表达（技术方案/交付计划）")
-        return False, "，".join(reasons)
+    if status not in BIDDABLE_REMOTE_STATUSES:
+        return False, f"remote_status={status or 'unknown'}, sub_status={sub_status or 'none'}"
 
-    # 7. 重复句式检测
-    sentences = description.split("。")
-    unique_sentences = set()
-    duplicate_count = 0
-    for s in sentences:
-        s_clean = s.strip()
-        if s_clean:
-            if s_clean in unique_sentences:
-                duplicate_count += 1
-            unique_sentences.add(s_clean)
-
-    if duplicate_count >= 2 and len(sentences) > 3:
-        reasons.append(f"存在重复句式 ({duplicate_count}处)")
-        return False, "，".join(reasons)
-
-    return True, "通过"
+    return True, "ok"
 
 
 async def create_bid(
@@ -146,6 +167,7 @@ async def create_bid(
     period: int,
     description: Optional[str] = None,
     skip_content_check: bool = False,
+    validate_remote_status: bool = True,
 ) -> Dict[str, Any]:
     """
     Submit a bid to Freelancer and record it.
@@ -157,13 +179,53 @@ async def create_bid(
             "Project not found in database. Please sync with Freelancer API first."
         )
 
+    # 1b. Idempotency: reject duplicate bids for the same project
+    existing_bid = db.query(Bid).filter_by(
+        project_freelancer_id=project_id
+    ).filter(
+        Bid.status.in_(["active", "submitted", "submitted_remote_only"])
+    ).first()
+    if existing_bid:
+        raise ValueError(
+            f"Duplicate bid rejected: an active bid (id={existing_bid.freelancer_bid_id}) "
+            f"already exists for project {project_id}."
+        )
+
+    if validate_remote_status:
+        is_biddable_now, reason = await validate_project_biddable_now(db, project)
+        if not is_biddable_now:
+            raise ValueError(
+                f"Project is not biddable now. {reason}"
+            )
+
+    # 1c. Bid amount range validation
+    ABS_MIN_AMOUNT = 5.0
+    ABS_MAX_AMOUNT = 50000.0
+    if amount < ABS_MIN_AMOUNT or amount > ABS_MAX_AMOUNT:
+        raise ValueError(
+            f"Bid amount ${amount:.2f} is outside the absolute allowed range "
+            f"(${ABS_MIN_AMOUNT:.0f} - ${ABS_MAX_AMOUNT:.0f})."
+        )
+    if project.budget_minimum is not None and project.budget_maximum is not None:
+        budget_min = float(project.budget_minimum)
+        budget_max = float(project.budget_maximum)
+        if budget_min > 0 and budget_max > 0:
+            lower_bound = budget_min * 0.5
+            upper_bound = budget_max * 1.5
+            if amount < lower_bound or amount > upper_bound:
+                raise ValueError(
+                    f"Bid amount ${amount:.2f} is outside the acceptable range "
+                    f"(${lower_bound:.2f} - ${upper_bound:.2f}) based on project budget "
+                    f"${budget_min:.0f} - ${budget_max:.0f}."
+                )
+
     # 2. Determine description (use AI draft from ProposalService if not provided)
     bid_description = description
     if not bid_description:
         # 使用新的 ProposalService 生成提案
         try:
             proposal_service = get_proposal_service()
-            proposal_result = await proposal_service.generate_proposal(project)
+            proposal_result = await proposal_service.generate_proposal(project, db=db)
             if proposal_result.get("success"):
                 bid_description = proposal_result.get("proposal", "")
                 # 保存生成的提案到项目记录
@@ -223,12 +285,46 @@ async def create_bid(
         db.commit()
         raise e
 
+    fallback_bidder_id = _coerce_int(getattr(client, "user_id", None))
+    bid_id, bidder_id = _extract_bid_ids(result or {}, fallback_bidder_id=fallback_bidder_id)
+
     # 5. Save to DB on success
+    if bid_id is None:
+        logger.warning(
+            "Bid submitted remotely but bid_id missing in response; skip bid row insert. "
+            "project_id=%s response=%s",
+            project_id,
+            result,
+        )
+        audit = AuditLog(
+            action="create_bid",
+            entity_type="bid",
+            entity_id=project_id,
+            request_data=f"amount={amount}, period={period}",
+            response_data=str(result),
+            status="success_without_local_bid_id",
+        )
+        db.add(audit)
+        db.commit()
+        return {
+            "bid_id": None,
+            "project_id": project_id,
+            "amount": amount,
+            "period": period,
+            "description": bid_description,
+            "status": "submitted_remote_only",
+        }
+
+    if bidder_id is None:
+        raise ValueError(
+            "Bid submitted but bidder_id missing in API response and no fallback user_id available."
+        )
+
     bid = Bid(
-        freelancer_bid_id=result.get("bid_id", {}).get("id") if result else 0,
+        freelancer_bid_id=bid_id,
         project_id=project.id,
         project_freelancer_id=project_id,
-        bidder_id=result.get("bidder_id", {}).get("id") if result else 0,
+        bidder_id=bidder_id,
         amount=amount,
         period=period,
         description=bid_description,
@@ -339,7 +435,7 @@ async def retract_bid(db: Session, bid_id: int) -> bool:
     client = get_freelancer_client()
 
     try:
-        result = await client.retract_bid(id_id)
+        result = await client.retract_bid(bid_id)
     except FreelancerAPIError as e:
         audit = AuditLog(
             action="retract_bid",

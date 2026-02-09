@@ -22,6 +22,7 @@ from enum import Enum
 
 from config import settings
 from utils.currency_converter import get_currency_converter
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ class RequirementQualityScorer:
                 "vue",
                 "docker",
                 "kubernetes",
-                "n8n",
+                "airflow",
             ],
         )
         self.vague_kws = clarity_cfg.get(
@@ -286,8 +287,8 @@ class ProjectScorer:
             config.weights if config else rules.get("weights", DEFAULT_WEIGHTS.copy())
         )
         self.user_skills = config.user_skills if config else settings.DEFAULT_SKILLS
-        self.min_hours = config.min_hours if config else 5
-        self.max_hours = config.max_hours if config else 500
+        self.min_hours = config.min_hours if config else ProjectComplexity.TRIVIAL.value[0]
+        self.max_hours = config.max_hours if config else ProjectComplexity.LARGE.value[1]
 
         # Load risk keywords from YAML if available, otherwise use defaults
         if config and config.risk_keywords:
@@ -299,6 +300,18 @@ class ProjectScorer:
             f"ProjectScorer initialized with weights={self.weights}, "
             f"skills={self.user_skills}"
         )
+
+    def fetch_weights_from_db(self, db: Session):
+        """Fetch weights from database and update scorer state."""
+        from database.models import ScoringRule
+        rules = db.query(ScoringRule).filter(ScoringRule.is_active == True).all()
+        if rules:
+            new_weights = {rule.name: rule.weight for rule in rules}
+            # Only update weights that exist in our default weights to avoid unknown dimensions
+            for name, weight in new_weights.items():
+                if name in self.weights:
+                    self.weights[name] = weight
+            logger.info(f"Updated scoring weights from DB: {self.weights}")
 
     @property
     def RISK_KEYWORDS(self) -> Dict[str, List[str]]:
@@ -429,8 +442,8 @@ class ProjectScorer:
         ):
             hours += 30
 
-        # 3. Integration complexity (n8n, make, etc.)
-        if "n8n" in combined_text or "workflow" in combined_text:
+        # 3. Integration complexity (workflow/orchestration tools)
+        if any(kw in combined_text for kw in ["workflow", "zapier", "make", "airflow"]):
             hours += 15
 
         small_task_keywords = ["fix", "bug", "small", "tweak", "script", "update"]
@@ -514,17 +527,60 @@ class ProjectScorer:
         scorer = RequirementQualityScorer(config=settings.scoring_rules)
         return scorer.score(description)
 
-    def score_competition(self, project: Dict[str, Any]) -> float:
+    def score_competition(self, project: Dict[str, Any], competition_analysis: Optional[Dict[str, Any]] = None) -> float:
         """
         Score competition level (0-10 points).
 
-        评分逻辑：
-        - bid_count 0-4: 得分 2.0
-        - bid_count 5-20: 得分 10.0
-        - bid_count 21-40: 得分 6.0
-        - bid_count > 40: 得分 2.0
-        - 24小时内发布项目加分
+        When *competition_analysis* (from competitor_bid_service.analyze_competition)
+        is provided, scoring uses real bid data for higher accuracy.
+        Otherwise falls back to the bid_count heuristic (backward-compatible).
+
+        评分逻辑（有竞争投标数据时）：
+        - active_bids 0-4: 得分 2.0（太少投标 = 项目可能有问题）
+        - active_bids 5-15: 得分 10.0（健康竞争）
+        - active_bids 16-30: 得分 7.0（中等竞争）
+        - active_bids 31-50: 得分 4.0（激烈竞争）
+        - active_bids > 50: 得分 2.0（过度竞争）
         """
+        if competition_analysis and competition_analysis.get("active_bids") is not None:
+            return self._score_competition_from_analysis(competition_analysis, project)
+
+        # Fallback: bid_count heuristic
+        return self._score_competition_from_bid_count(project)
+
+    def _score_competition_from_analysis(
+        self,
+        analysis: Dict[str, Any],
+        project: Dict[str, Any],
+    ) -> float:
+        """Score competition using real competitor bid data."""
+        active = analysis.get("active_bids", 0)
+
+        if active <= 4:
+            score = 2.0
+        elif active <= 15:
+            score = 10.0
+        elif active <= 30:
+            score = 7.0
+        elif active <= 50:
+            score = 4.0
+        else:
+            score = 2.0
+
+        # Bonus: few top-reputation bidders = less threat
+        rep_info = analysis.get("reputation", {})
+        top_bidders = rep_info.get("top_bidders", 0)
+        if top_bidders == 0 and active > 0:
+            score = min(10.0, score + 1.0)
+        elif top_bidders >= 5:
+            score = max(0.0, score - 1.0)
+
+        # Recency bonus (same as fallback)
+        score = self._apply_recency_bonus(score, project)
+        return score
+
+    def _score_competition_from_bid_count(self, project: Dict[str, Any]) -> float:
+        """Original bid_count-based competition scoring (backward-compatible)."""
         bid_stats = project.get("bid_stats", {})
         bid_count = bid_stats.get("bid_count", 0)
 
@@ -537,6 +593,12 @@ class ProjectScorer:
         else:
             score = 2.0
 
+        score = self._apply_recency_bonus(score, project)
+        return score
+
+    @staticmethod
+    def _apply_recency_bonus(score: float, project: Dict[str, Any]) -> float:
+        """Add +1 bonus if project was submitted within 24 hours."""
         submitdate = project.get("submitdate")
         if submitdate:
             try:
@@ -547,7 +609,6 @@ class ProjectScorer:
                     score = min(10.0, score + 1.0)
             except (TypeError, ValueError):
                 pass
-
         return score
 
     def detect_risk_keywords(self, project: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -670,7 +731,8 @@ class ProjectScorer:
         return "，".join(reasons) + "。"
 
     def score_project(
-        self, project: Dict[str, Any], client_risk_score: Optional[int] = None
+        self, project: Dict[str, Any], client_risk_score: Optional[int] = None,
+        competition_analysis: Optional[Dict[str, Any]] = None,
     ) -> ProjectScore:
         """
         Calculate complete score for a project (10-point scale).
@@ -678,6 +740,7 @@ class ProjectScorer:
         Args:
             project: Project data
             client_risk_score: Optional risk score (0-100, higher is riskier) from client_risk service
+            competition_analysis: Optional real competitor bid analysis from competitor_bid_service
         """
         estimated_hours = self.estimate_project_hours(project)
         budget_efficiency_score, hourly_rate = self.score_budget_efficiency(
@@ -696,7 +759,7 @@ class ProjectScorer:
             budget_efficiency_score=budget_efficiency_score,
             estimated_hours=estimated_hours,
             hourly_rate=hourly_rate,
-            competition_score=self.score_competition(project),
+            competition_score=self.score_competition(project, competition_analysis),
             clarity_score=self.score_requirement_quality(project),
             customer_score=self.score_customer(project),
             tech_score=self.score_tech_match(project),
@@ -832,7 +895,7 @@ def configure_scorer(config: ScoringConfig) -> None:
     Example:
         # 应用启动时
         config = ScoringConfig(
-            user_skills=["python", "n8n", "automation"],
+            user_skills=["python", "airflow", "automation"],
             weights={
                 "budget_efficiency": 0.35,  # 更重视预算
                 "tech": 0.25,               # 技术匹配

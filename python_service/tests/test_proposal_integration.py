@@ -7,6 +7,7 @@ to avoid actual API calls while validating service integration.
 
 import sys
 from pathlib import Path
+import asyncio
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYTHON_SERVICE = REPO_ROOT / "python_service"
@@ -16,6 +17,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
+import services.proposal_service as proposal_service_module
 
 from services.proposal_service import (
     ProposalService,
@@ -23,6 +25,7 @@ from services.proposal_service import (
     DefaultProposalValidator,
     DefaultPersonaController,
     LLMClientProtocol,
+    MultiProviderLLMClientAdapter,
 )
 from database.models import Project
 
@@ -219,6 +222,40 @@ class TestProposalServiceIntegration:
             sample_project.to_dict(), score_data, {}
         )
 
+    def test_build_user_prompt_contains_risk_compatibility_terms(
+        self, sample_project, mock_llm_client, proposal_config
+    ):
+        service = ProposalService(
+            llm_client=mock_llm_client,
+            config=proposal_config,
+        )
+        prompt = service._build_user_prompt(sample_project.to_dict(), {}, {})
+        assert "technical" in prompt.lower()
+        assert "budget" in prompt.lower()
+
+    def test_build_user_prompt_contains_project_specific_coverage(
+        self, sample_project, mock_llm_client, proposal_config
+    ):
+        service = ProposalService(
+            llm_client=mock_llm_client,
+            config=proposal_config,
+        )
+        project = sample_project.to_dict()
+        project["description"] = (
+            "Need webhook handling, admin dashboard, and OTP verification "
+            "with clear logging and deployment docs."
+        )
+        prompt = service._build_user_prompt(
+            project,
+            {"suggested_bid": 800, "estimated_hours": 24},
+            {},
+        )
+        lower_prompt = prompt.lower()
+        assert "project-specific mandatory coverage" in lower_prompt
+        assert "otp verification" in lower_prompt
+        assert "admin dashboard" in lower_prompt
+        assert "if you mention a numeric quote" in lower_prompt
+
     @pytest.mark.asyncio
     async def test_generate_proposal_validation_failure_triggers_retry(
         self, sample_project, mock_llm_client_template_response, proposal_config
@@ -245,6 +282,86 @@ class TestProposalServiceIntegration:
         # Should have attempted multiple times
         assert result["attempts"] >= 1
 
+    @pytest.mark.asyncio
+    async def test_generate_proposal_regenerates_in_english_when_first_output_non_english(
+        self, sample_project
+    ):
+        """Final bid content should be directly regenerated in English, not translated."""
+        chinese_proposal = (
+            "我可以帮助你完成这个项目，并提供完整方案。"
+            "首先我会梳理需求，其次我会实现核心功能，最后我会交付和优化。"
+        )
+        english_proposal = (
+            "I can help you complete this project with a clear implementation plan. "
+            "First, I will clarify scope and acceptance criteria. "
+            "Then I will implement core features with strong testing and risk controls. "
+            "Finally, I will deliver, document, and support a smooth handover."
+        )
+
+        llm_client = MagicMock(spec=LLMClientProtocol)
+        llm_client.generate_proposal = AsyncMock(
+            side_effect=[chinese_proposal, english_proposal]
+        )
+
+        config = ProposalConfig(
+            max_retries=2,
+            timeout=30.0,
+            min_length=50,
+            max_length=1000,
+            validate_before_return=False,
+            fallback_enabled=True,
+            model="gpt-4o-mini",
+            temperature=0.7,
+        )
+        service = ProposalService(llm_client=llm_client, config=config)
+
+        result = await service.generate_proposal(sample_project)
+
+        assert result["success"] is True
+        assert result["proposal"] == english_proposal
+        assert llm_client.generate_proposal.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_generate_proposal_auto_compresses_when_over_target_length(
+        self, sample_project
+    ):
+        """Overlong proposal should trigger an automatic compression rewrite pass."""
+        long_proposal = (
+            "This is a highly detailed proposal. " * 120
+            + "technical implementation delivery plan approach solution budget 1200 USD?"
+        )
+        compressed_proposal = (
+            "I can deliver your RAG backend with a technical implementation plan and clear delivery milestones. "
+            "For budget alignment, my quote is 1200 USD within your range. "
+            "Should we prioritize admin document controls first?"
+        )
+
+        llm_client = MagicMock(spec=LLMClientProtocol)
+        llm_client.generate_proposal = AsyncMock(
+            side_effect=[long_proposal, compressed_proposal]
+        )
+
+        config = ProposalConfig(
+            max_retries=1,
+            timeout=30.0,
+            min_length=200,
+            max_length=1800,
+            target_char_min=700,
+            target_char_max=1200,
+            validate_before_return=False,
+            fallback_enabled=True,
+            model="gpt-4o-mini",
+            temperature=0.7,
+        )
+        service = ProposalService(llm_client=llm_client, config=config)
+
+        result = await service.generate_proposal(sample_project)
+
+        assert result["success"] is True
+        assert result["proposal"] == compressed_proposal
+        assert len(result["proposal"]) < len(long_proposal)
+        assert llm_client.generate_proposal.call_count == 2
+
 
 class TestProposalServiceWithBidService:
     """Integration tests for ProposalService integration with bid_service."""
@@ -264,11 +381,47 @@ class TestProposalServiceWithBidService:
 
         # Verify the result format matches what bid_service expects
         assert "success" in result
-        assert "proposal" in result
 
-        # If successful, proposal should be usable
-        if result["success"]:
-            assert len(result["proposal"]) >= proposal_config.min_length
+
+class TestProposalValidatorProjectAnchors:
+    def test_validator_rejects_generic_proposal_without_project_anchors(self):
+        validator = DefaultProposalValidator(min_length=120, max_length=1200)
+        project = {
+            "title": "WhatsApp Order & OTP Automation with Admin Dashboard",
+            "description": (
+                "Need WhatsApp webhook integration, OTP verification, state machine flow, "
+                "and admin dashboard for scheduling."
+            ),
+        }
+        proposal = (
+            "I can provide a technical implementation plan with high quality delivery. "
+            "My approach is professional and solution oriented with solid execution details. "
+            "The budget is within range and I can start immediately. "
+            "Please share access details."
+        )
+
+        valid, issues = validator.validate(proposal, project)
+        assert valid is False
+        assert any("关键需求点覆盖不足" in issue for issue in issues)
+
+    def test_validator_accepts_phrase_anchor_partial_token_match(self):
+        validator = DefaultProposalValidator(min_length=120, max_length=1200)
+        project = {
+            "title": "WhatsApp Order & OTP Automation with Admin Dashboard",
+            "description": (
+                "Need WhatsApp webhook integration, OTP verification, state machine flow, "
+                "and admin dashboard for scheduling."
+            ),
+        }
+        proposal = (
+            "I can deliver a technical implementation plan for your WhatsApp webhook backend. "
+            "My approach includes OTP flow handling, delivery checkpoints, and dashboard updates. "
+            "The budget is aligned with your range, and I can start immediately. "
+            "Could you share your preferred deployment environment?"
+        )
+
+        valid, issues = validator.validate(proposal, project)
+        assert not any("关键需求点覆盖不足" in issue for issue in issues)
 
 
 class TestPersonaControllerIntegration:
@@ -412,6 +565,47 @@ class TestValidatorIntegration:
         )
         # Check if keyword stuffing was detected (or short length which is also valid failure)
 
+    @pytest.mark.asyncio
+    async def test_validation_failure_returns_error_instead_of_partial_success(
+        self, sample_project, mock_llm_client, proposal_config
+    ):
+        """Validation failures should not return success with invalid proposal."""
+
+        class AlwaysInvalidValidator:
+            def validate(self, proposal, project):
+                return False, ["mock validation failure"]
+
+            def get_min_length(self):
+                return 1
+
+            def get_max_length(self):
+                return 9999
+
+        config = ProposalConfig(
+            max_retries=2,
+            timeout=proposal_config.timeout,
+            min_length=proposal_config.min_length,
+            max_length=proposal_config.max_length,
+            validate_before_return=True,
+            fallback_enabled=True,
+            model=proposal_config.model,
+            temperature=proposal_config.temperature,
+        )
+
+        service = ProposalService(
+            llm_client=mock_llm_client,
+            validator=AlwaysInvalidValidator(),
+            config=config,
+        )
+
+        result = await service.generate_proposal(sample_project)
+
+        assert result["success"] is False
+        assert result["validation_passed"] is False
+        assert result["attempts"] == 2
+        assert result["error"] == "proposal_validation_failed"
+        assert "mock validation failure" in result["validation_issues"]
+
 
 class TestFallbackMechanism:
     """Tests for fallback proposal generation."""
@@ -459,3 +653,135 @@ class TestServiceReset:
 
         # They should be different instances
         assert service1 is not service2
+
+
+class TestProviderFallbackAndTimeout:
+    """Tests for provider fallback and timeout enforcement."""
+
+    def test_proposal_service_prioritizes_primary_provider(self, monkeypatch, proposal_config):
+        captured = {}
+
+        class DummyMultiProvider:
+            def __init__(self, providers, default_model, timeout=None):
+                captured["providers"] = providers
+                captured["default_model"] = default_model
+                captured["timeout"] = timeout
+
+            async def generate_proposal(
+                self,
+                *,
+                system_prompt: str,
+                user_prompt: str,
+                model: str,
+                temperature: float,
+            ) -> str:
+                return "ok"
+
+        monkeypatch.setattr(
+            proposal_service_module, "MultiProviderLLMClientAdapter", DummyMultiProvider
+        )
+        monkeypatch.setattr(
+            proposal_service_module.settings.__class__,
+            "get_enabled_llm_providers",
+            lambda _self: [
+                {
+                    "name": "deepseek",
+                    "api_key": "k-deepseek",
+                    "model": "deepseek-chat",
+                    "base_url": "https://api.deepseek.com",
+                },
+                {
+                    "name": "zhipu",
+                    "api_key": "k-zhipu",
+                    "model": "glm-4",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                },
+            ],
+        )
+        monkeypatch.setattr(proposal_service_module.settings, "LLM_PROVIDER", "zhipu")
+
+        service = ProposalService(config=proposal_config)
+        assert service.llm_client is not None
+        assert captured["providers"][0]["name"] == "zhipu"
+        assert captured["providers"][1]["name"] == "deepseek"
+
+    @pytest.mark.asyncio
+    async def test_multi_provider_fallback_uses_secondary_provider(self, monkeypatch):
+        call_order = []
+
+        class DummyAdapter:
+            def __init__(
+                self,
+                api_key: str,
+                model: str,
+                base_url: str | None = None,
+                timeout: float | None = None,
+                provider_name: str = "openai",
+            ):
+                self.provider_name = provider_name
+
+            async def generate_proposal(
+                self,
+                *,
+                system_prompt: str,
+                user_prompt: str,
+                model: str,
+                temperature: float,
+            ) -> str:
+                call_order.append(self.provider_name)
+                if self.provider_name == "openai":
+                    raise RuntimeError("primary provider timeout")
+                return "secondary provider proposal"
+
+        monkeypatch.setattr(proposal_service_module, "OpenAILLMClientAdapter", DummyAdapter)
+
+        llm = MultiProviderLLMClientAdapter(
+            providers=[
+                {"name": "openai", "api_key": "k1", "model": "m1"},
+                {"name": "zhipu", "api_key": "k2", "model": "m2"},
+            ],
+            default_model="m-default",
+            timeout=0.1,
+        )
+
+        proposal = await llm.generate_proposal(
+            system_prompt="system",
+            user_prompt="user",
+            model="ignored-model",
+            temperature=0.7,
+        )
+
+        assert proposal == "secondary provider proposal"
+        assert call_order == ["openai", "zhipu"]
+
+    @pytest.mark.asyncio
+    async def test_proposal_service_enforces_timeout(self, sample_project):
+        class SlowClient:
+            async def generate_proposal(
+                self,
+                *,
+                system_prompt: str,
+                user_prompt: str,
+                model: str,
+                temperature: float,
+            ) -> str:
+                await asyncio.sleep(0.2)
+                return "late proposal"
+
+        service = ProposalService(
+            llm_client=SlowClient(),
+            config=ProposalConfig(
+                max_retries=1,
+                timeout=0.05,
+                min_length=50,
+                max_length=800,
+                validate_before_return=True,
+                fallback_enabled=True,
+                model="gpt-4o-mini",
+                temperature=0.7,
+            ),
+        )
+
+        result = await service.generate_proposal(sample_project)
+        assert result["success"] is False
+        assert result["attempts"] == 1

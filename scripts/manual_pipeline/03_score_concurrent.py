@@ -6,6 +6,9 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from datetime import datetime, timedelta
+
+from sqlalchemy import func
 
 script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(script_dir))
@@ -20,6 +23,22 @@ def main(argv=None) -> int:
     parser.add_argument("--batch-size", type=int, default=5, help="Concurrent batch size")
     parser.add_argument("--limit", type=int, default=50, help="Max projects to score")
     parser.add_argument("--max-retries", type=int, default=2, help="Retry attempts per project")
+    parser.add_argument(
+        "--since-days",
+        type=int,
+        default=common.DEFAULT_LOOKBACK_DAYS,
+        help="Only score projects from recent N days",
+    )
+    parser.add_argument(
+        "--allowed-statuses",
+        default=",".join(common.DEFAULT_BIDDABLE_STATUSES),
+        help="Comma-separated allowed statuses",
+    )
+    parser.add_argument(
+        "--include-hourly",
+        action="store_true",
+        help="Include hourly projects in scoring (default: fixed-price only)",
+    )
     parser.add_argument("--lock-file", default=str(common.DEFAULT_LOCK_FILE), help="Lock file path")
     args = parser.parse_args(argv)
 
@@ -37,6 +56,16 @@ def main(argv=None) -> int:
             print(f"Failed to load settings: {exc}")
             return common.EXIT_VALIDATION_ERROR
 
+        if args.since_days <= 0:
+            print("--since-days must be greater than 0.")
+            return common.EXIT_VALIDATION_ERROR
+
+        allowed_statuses = common.parse_statuses(
+            args.allowed_statuses,
+            default=list(common.DEFAULT_BIDDABLE_STATUSES),
+        )
+        cutoff_time = datetime.utcnow() - timedelta(days=args.since_days)
+
         # Get enabled LLM providers
         from config import settings as config_settings
         providers = config_settings.get_enabled_llm_providers()
@@ -53,10 +82,14 @@ def main(argv=None) -> int:
             pending = (
                 db.query(Project)
                 .filter(Project.ai_score.is_(None))
+                .filter(func.lower(Project.status).in_(allowed_statuses))
+                .filter(Project.created_at >= cutoff_time)
                 .order_by(Project.created_at.desc())
                 .limit(args.limit)
                 .all()
             )
+            if not args.include_hourly:
+                pending = [p for p in pending if getattr(p, "type_id", None) == 1]
 
             if not pending:
                 print("Scored 0 projects. No un-scored projects found.")

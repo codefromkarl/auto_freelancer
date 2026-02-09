@@ -11,16 +11,16 @@ weights:
 clarity:
   deliverable_keywords: ["deliverable", "output", "result", "complete", "milestone", "step"]
   acceptance_keywords: ["acceptance", "criteria", "requirements", "specs", "specification", "test"]
-  tech_spec_keywords: ["flask", "selenium", "pandas", "fastapi", "sqlalchemy", "react", "vue", "docker", "kubernetes", "n8n", "postgresql", "redis"]
+  tech_spec_keywords: ["flask", "selenium", "pandas", "fastapi", "sqlalchemy", "react", "vue", "docker", "kubernetes", "airflow", "postgresql", "redis"]
   vague_keywords: ["optimize", "improve", "insights", "better", "best way", "enhancement", "seamless", "flexible"]
 
 # Customer Scoring Rules
 customer:
   payment_verified_bonus: 0.0
-  payment_not_verified_penalty: -5.0
+  payment_not_verified_penalty: -1.5   # Was -5.0; API often lacks this info
   low_hire_rate_threshold: 0.30
-  low_hire_rate_penalty: -3.0
-  new_customer_penalty: -4.0
+  low_hire_rate_penalty: -2.0          # Was -3.0; softer penalty
+  new_customer_penalty: -1.0           # Was -4.0; most API results lack client history
   online_bonus: 2.0
   rating_4_5_bonus: 3.0
   rating_4_0_bonus: 1.5

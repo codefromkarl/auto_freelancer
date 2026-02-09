@@ -24,6 +24,8 @@ if str(REPO_ROOT) not in sys.path:
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 FALLBACK_ENV_FILE = PYTHON_SERVICE_ROOT / ".env"
 DEFAULT_LOCK_FILE = REPO_ROOT / "scripts" / "manual_pipeline" / ".pipeline.lock"
+DEFAULT_LOOKBACK_DAYS = 7
+DEFAULT_BIDDABLE_STATUSES = ("open", "active", "open_for_bidding")
 
 
 EXIT_SUCCESS = 0
@@ -95,6 +97,14 @@ def validate_env(
 
     ok = not missing and not invalid
     return ok, missing, invalid
+
+
+def parse_statuses(raw: str, default: Optional[list[str]] = None) -> list[str]:
+    """Parse comma-separated statuses and normalize to lowercase."""
+    values = [item.strip().lower() for item in (raw or "").split(",") if item.strip()]
+    if values:
+        return values
+    return list(default or DEFAULT_BIDDABLE_STATUSES)
 
 
 def get_settings():

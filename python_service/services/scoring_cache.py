@@ -368,6 +368,10 @@ class ScoringCache:
         Returns:
             缓存键
         """
+        # Include description hash to invalidate cache when description changes
+        description = str(project_data.get("description", "") or "")
+        desc_hash = hashlib.md5(description.encode()).hexdigest()[:8]
+
         # 提取关键特征
         key_features = {
             "id": project_data.get("id"),
@@ -375,6 +379,7 @@ class ScoringCache:
             "budget_min": project_data.get("budget_minimum"),
             "budget_max": project_data.get("budget_maximum"),
             "currency": project_data.get("currency_code"),
+            "desc_hash": desc_hash,
         }
 
         if weights:

@@ -11,14 +11,12 @@ script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(script_dir))
 
 import common
-from database.models import Project
 from services import project_service
 from services.freelancer_client import FreelancerAPIError
 
 
 DEFAULT_KEYWORDS = [
     "python automation",
-    "n8n",
     "fastapi",
     "web scraping",
     "api integration",
@@ -29,6 +27,22 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Fetch projects and store in database.")
     parser.add_argument("--keywords", default=",".join(DEFAULT_KEYWORDS), help="Comma-separated keywords")
     parser.add_argument("--limit", type=int, default=20, help="Max results per keyword")
+    parser.add_argument(
+        "--since-days",
+        type=int,
+        default=common.DEFAULT_LOOKBACK_DAYS,
+        help="Only keep projects submitted within N days",
+    )
+    parser.add_argument(
+        "--allowed-statuses",
+        default=",".join(common.DEFAULT_BIDDABLE_STATUSES),
+        help="Comma-separated allowed statuses",
+    )
+    parser.add_argument(
+        "--include-hourly",
+        action="store_true",
+        help="Include hourly projects (default: only fixed-price projects)",
+    )
     parser.add_argument("--lock-file", default=str(common.DEFAULT_LOCK_FILE), help="Lock file path")
     args = parser.parse_args(argv)
 
@@ -51,6 +65,15 @@ def main(argv=None) -> int:
             print("No keywords provided.")
             return common.EXIT_VALIDATION_ERROR
 
+        if args.since_days <= 0:
+            print("--since-days must be greater than 0.")
+            return common.EXIT_VALIDATION_ERROR
+
+        allowed_statuses = common.parse_statuses(
+            args.allowed_statuses,
+            default=list(common.DEFAULT_BIDDABLE_STATUSES),
+        )
+
         total_fetched = 0
         new_ids: set[int] = set()
         errors = 0
@@ -64,6 +87,10 @@ def main(argv=None) -> int:
                             query=keyword,
                             limit=args.limit,
                             offset=0,
+                            sync_from_api=True,
+                            since_days=args.since_days,
+                            allowed_statuses=allowed_statuses,
+                            fixed_price_only=not args.include_hourly,
                         )
                     )
                     total_fetched += len(results)
@@ -77,13 +104,6 @@ def main(argv=None) -> int:
                 except Exception as exc:
                     logger.error(f"Fetch error for keyword '{keyword}': {exc}")
                     errors += 1
-
-            if new_ids:
-                db.query(Project).filter(Project.freelancer_id.in_(list(new_ids))).update(
-                    {Project.status: "fetched"},
-                    synchronize_session=False,
-                )
-                db.commit()
 
         print(f"Fetched {total_fetched} projects. {len(new_ids)} new added to DB.")
         if errors:

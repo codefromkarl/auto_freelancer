@@ -6,6 +6,9 @@ import argparse
 import sys
 from pathlib import Path
 import json
+from datetime import datetime, timedelta
+
+from sqlalchemy import func
 
 script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(script_dir))
@@ -18,24 +21,51 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Send project notifications to Telegram.")
     parser.add_argument("--threshold", type=float, default=7.0, help="Minimum score threshold")
     parser.add_argument("--limit", type=int, default=10, help="Max projects to send")
+    parser.add_argument(
+        "--since-days",
+        type=int,
+        default=common.DEFAULT_LOOKBACK_DAYS,
+        help="Only notify projects from recent N days",
+    )
+    parser.add_argument(
+        "--allowed-statuses",
+        default=",".join(common.DEFAULT_BIDDABLE_STATUSES),
+        help="Comma-separated allowed statuses",
+    )
     parser.add_argument("--lock-file", default=str(common.DEFAULT_LOCK_FILE), help="Lock file path")
     args = parser.parse_args(argv)
 
     logger = common.setup_logging("manual_telegram_notify")
 
-    # Load env to get Telegram credentials
-    import os
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
-        print("Error: Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in .env")
-        return common.EXIT_VALIDATION_ERROR
-
     with common.file_lock(Path(args.lock_file), blocking=False) as acquired:
         if not acquired:
             print("Lock busy. Another workflow may be running.")
             return common.EXIT_LOCK_ERROR
+
+        if args.since_days <= 0:
+            print("--since-days must be greater than 0.")
+            return common.EXIT_VALIDATION_ERROR
+
+        allowed_statuses = common.parse_statuses(
+            args.allowed_statuses,
+            default=list(common.DEFAULT_BIDDABLE_STATUSES),
+        )
+        cutoff_time = datetime.utcnow() - timedelta(days=args.since_days)
+
+        try:
+            common.load_env()
+        except Exception as exc:
+            print(f"Failed to load env file: {exc}")
+            return common.EXIT_VALIDATION_ERROR
+
+        # Load env to get Telegram credentials
+        import os
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+        if not bot_token or not chat_id:
+            print("Error: Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in .env")
+            return common.EXIT_VALIDATION_ERROR
 
         with common.get_db_context() as db:
             # Get high-scored projects
@@ -43,6 +73,8 @@ def main(argv=None) -> int:
                 db.query(Project)
                 .filter(Project.ai_score >= args.threshold)
                 .filter(Project.ai_score.isnot(None))
+                .filter(func.lower(Project.status).in_(allowed_statuses))
+                .filter(Project.created_at >= cutoff_time)
                 .order_by(Project.ai_score.desc())
                 .limit(args.limit)
                 .all()

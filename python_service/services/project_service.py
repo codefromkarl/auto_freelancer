@@ -1,9 +1,10 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import json
+import asyncio
 
 from database.models import Project
 from services.freelancer_client import get_freelancer_client, FreelancerAPIError
@@ -15,6 +16,8 @@ from config import settings
 from utils.currency_converter import get_currency_converter
 
 logger = logging.getLogger(__name__)
+_BIDDABLE_STATUSES = {"open", "active", "open_for_bidding"}
+_STICKY_LOCAL_STATUSES = {"bid_submitted", "skills_blocked"}
 
 
 def _check_skill_match(project_dict: Dict[str, Any]) -> bool:
@@ -61,7 +64,9 @@ def _pre_filter_projects(
     budget_min_threshold: float = None,
     min_desc_length: int = None,
     allowed_statuses: List[str] = None,
-    enable_skill_match: bool = True
+    enable_skill_match: bool = True,
+    min_submit_ts: Optional[int] = None,
+    fixed_price_only: bool = True,
 ) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
     初筛项目数据
@@ -83,10 +88,28 @@ def _pre_filter_projects(
         'filtered_desc': 0,
         'filtered_status': 0,
         'filtered_skill': 0,
+        'filtered_time': 0,
+        'filtered_billing_type': 0,
         'kept': 0
     }
 
     for project in projects_data:
+        # 0.5 计费类型筛选（默认只保留 fixed 一次性项目）
+        if fixed_price_only:
+            project_type = str(project.get("type") or "").lower()
+            if project_type and project_type != "fixed":
+                stats['filtered_billing_type'] += 1
+                logger.debug("Filtered by billing type: %s (type=%s)", project.get("title"), project_type)
+                continue
+
+        # 0. 发布时间筛选（只保留最近项目）
+        if min_submit_ts is not None:
+            submit_ts = _parse_submit_timestamp(project.get("submitdate"))
+            if submit_ts is None or submit_ts < min_submit_ts:
+                stats['filtered_time'] += 1
+                logger.debug("Filtered by submitdate: %s", project.get('title'))
+                continue
+
         # 1. 预算筛选
         if budget_min_threshold is not None:
             budget_info = project.get('budget', {})
@@ -140,6 +163,79 @@ def _pre_filter_projects(
     logger.info(f"Pre-filter results: {stats}")
     return filtered, stats
 
+
+def _apply_project_fields(project: Project, project_dict: Dict[str, Any]) -> None:
+    """
+    Apply mutable fields from API payload to local Project row.
+    """
+    budget = project_dict.get("budget", {}) or {}
+    currency = project_dict.get("currency", {}) or {}
+
+    project.title = project_dict.get("title", project.title or "")
+    project.preview_description = project_dict.get(
+        "preview_description", project.preview_description
+    )
+    project.description = project_dict.get("description", project.description)
+    project.budget_minimum = budget.get("minimum", project.budget_minimum)
+    project.budget_maximum = budget.get("maximum", project.budget_maximum)
+    project.currency_code = currency.get("code", project.currency_code or "USD")
+    remote_status = str(project_dict.get("status", project.status or "open")).lower()
+    current_status = str(project.status or "").lower()
+    if current_status in _STICKY_LOCAL_STATUSES and remote_status in _BIDDABLE_STATUSES:
+        # Keep local terminal/blocked marker to avoid repeated attempts after periodic sync.
+        project.status = current_status
+    else:
+        project.status = remote_status or "open"
+    project_type = str(project_dict.get("type") or "").lower()
+    if project_type == "fixed":
+        project.type_id = 1
+    elif project_type == "hourly":
+        project.type_id = 2
+    project.owner_id = project_dict.get("owner_id", project.owner_id)
+    submitdate = project_dict.get("submitdate")
+    if submitdate is not None:
+        project.submitdate = str(submitdate)
+    project.updated_at = datetime.utcnow()
+
+
+def _parse_submit_timestamp(raw_submitdate: Any) -> Optional[int]:
+    """Parse project submitdate from multiple possible formats into unix timestamp(seconds)."""
+    if raw_submitdate is None:
+        return None
+
+    # int/float unix timestamp
+    if isinstance(raw_submitdate, (int, float)):
+        ts = int(raw_submitdate)
+        if ts > 10_000_000_000:  # milliseconds
+            ts //= 1000
+        return ts if ts > 0 else None
+
+    # string forms
+    raw = str(raw_submitdate).strip()
+    if not raw:
+        return None
+
+    if raw.isdigit():
+        ts = int(raw)
+        if ts > 10_000_000_000:  # milliseconds
+            ts //= 1000
+        return ts if ts > 0 else None
+
+    # ISO datetime fallback
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return int(parsed.timestamp())
+    except Exception:
+        return None
+
+# Async lock to serialize sync operations; _is_syncing kept for status queries.
+_sync_lock = asyncio.Lock()
+_is_syncing = False
+
+def is_currently_syncing() -> bool:
+    """获取当前同步状态"""
+    return _is_syncing
+
 async def search_projects(
     db: Session,
     query: Optional[str] = None,
@@ -147,145 +243,123 @@ async def search_projects(
     budget_min: Optional[float] = None,
     budget_max: Optional[float] = None,
     status: Optional[str] = None,
+    min_score: Optional[float] = None,
+    max_score: Optional[float] = None,
     limit: int = 20,
     offset: int = 0,
-    enable_pre_filter: bool = True  # 是否启用初筛
+    sync_from_api: bool = False,  # 只有明确要求时才同步
+    allowed_statuses: Optional[List[str]] = None,
+    since_days: Optional[int] = None,
+    fixed_price_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Search projects via Freelancer API and store/update them in local DB.
-
-    初筛流程：
-    1. 调用搜索API获取项目列表
-    2. 应用初筛规则（预算、描述长度、状态、技能匹配）
-    3. 对筛选后的项目调用详情API
-    4. 将详情数据入库
-
-    Args:
-        enable_pre_filter: 是否启用初筛，默认True
+    Search projects in local database.
+    If sync_from_api is True, fetch from Freelancer API first.
     """
-    client = get_freelancer_client()
+    normalized_allowed_statuses = [s.lower() for s in (allowed_statuses or settings.ALLOWED_STATUSES)]
+    min_submit_ts = None
+    if since_days is not None and since_days > 0:
+        min_submit_ts = int((datetime.utcnow() - timedelta(days=since_days)).timestamp())
+    
+    # 1. 如果明确要求同步，先执行抓取同步逻辑
+    if sync_from_api:
+        if _sync_lock.locked():
+            logger.info("Sync already in progress, skipping duplicate request")
+            return []
 
-    # 1. Fetch from API (搜索结果)
-    projects_data = await client.search_projects(
-        query=query,
-        skills=skills,
-        budget_min=budget_min,
-        budget_max=budget_max,
-        status=status,
-        limit=limit,
-        offset=offset
-    )
+        from database.connection import get_db_session
 
-    stored_projects = []
-
-    if projects_data:
-        # 2. Pre-filter projects based on criteria
-        if enable_pre_filter:
-            filtered_projects, filter_stats = _pre_filter_projects(
-                projects_data=projects_data,
-                budget_min_threshold=settings.MIN_BUDGET_THRESHOLD,
-                min_desc_length=settings.MIN_DESCRIPTION_LENGTH,
-                allowed_statuses=settings.ALLOWED_STATUSES,
-                enable_skill_match=True
-            )
-
-            logger.info(f"Pre-filter applied: {filter_stats['total']} -> {filter_stats['kept']} projects kept")
-
-            # 3. 对筛选后的项目调用详情API，获取完整数据
-            projects_to_store = []
-            
-            # 准备 SDK 详情请求参数
-            proj_details_obj = create_get_projects_project_details_object(
-                full_description=True
-            )
-            user_details_obj = create_get_projects_user_details_object(
-                basic=True,
-                reputation=True,
-                employer_reputation=True
-            )
-
-            for project in filtered_projects:
-                project_id = project.get('id')
-                if project_id:
-                    try:
-                        # 获取完整的项目详情（包含bid_stats、owner_info）
-                        # 使用 SDK 获取基础详情
-                        detail = await client.get_project(
-                            project_id,
-                            project_details=proj_details_obj,
-                            user_details=user_details_obj
-                        )
-                        
-                        if detail:
-                            # 强化：如果 SDK 返回的描述仍然不全（可能受限），尝试通过 HTTP 直接拉取全文
-                            if len(detail.get('description', '')) < 200:
-                                full_desc = await client._fetch_full_description(project_id)
-                                if full_desc and len(full_desc) > len(detail.get('description', '')):
-                                    detail['description'] = full_desc
-                                    logger.info(f"  Enriched project {project_id} with full HTTP description")
-
-                            detail['pre_filtered'] = True
-                            projects_to_store.append(detail)
-                            logger.info(f"  Fetched full details for project {project_id}")
-                        else:
-                            logger.warning(f"  Empty details for project {project_id}, skipping")
-                    except Exception as e:
-                        logger.warning(f"  Failed to fetch details for project {project_id}: {e}, skipping")
-        else:
-            # 不使用初筛，直接使用搜索结果
-            projects_to_store = projects_data
-
-        # 4. Extract IDs to check existence
-        project_ids = [p.get('id') for p in projects_to_store if p.get('id')]
-
-        # Batch query existing projects to avoid duplicates
-        existing_ids = set()
-        if project_ids:
-            results = db.query(Project.freelancer_id).filter(Project.freelancer_id.in_(project_ids)).all()
-            existing_ids = {r[0] for r in results}
-
-        new_projects = []
-        for project_dict in projects_to_store:
-            project_id = project_dict.get('id')
-
-            if project_id and project_id not in existing_ids:
-                # Prepare JSON fields
-                bid_stats = json.dumps(project_dict.get('bid_stats', {})) if project_dict.get('bid_stats') else None
-                owner_info = json.dumps(project_dict.get('owner_info', {})) if project_dict.get('owner_info') else None
-
-                # Create new project record
-                project = Project(
-                    freelancer_id=project_id,
-                    title=project_dict.get('title', ''),
-                    description=project_dict.get('full_description') or project_dict.get('description'),
-                    preview_description=project_dict.get('preview_description'),
-                    budget_minimum=project_dict.get('budget', {}).get('minimum'),
-                    budget_maximum=project_dict.get('budget', {}).get('maximum'),
-                    currency_code=project_dict.get('currency', {}).get('code', 'USD'),
-                    submitdate=project_dict.get('submitdate'),
-                    status=project_dict.get('status', 'open'),
-                    type_id=project_dict.get('type_id'),
-                    skills=str(project_dict.get('jobs', [])),
-                    owner_id=project_dict.get('owner_id'),
-                    country=project_dict.get('country', {}).get('name'),
-                    deadline=project_dict.get('deadline'),
-                    bid_stats=bid_stats,
-                    owner_info=owner_info,
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
+        async with _sync_lock:
+            global _is_syncing
+            _is_syncing = True
+            try:
+                client = get_freelancer_client()
+                p_data = await client.search_projects(
+                    query=query,
+                    skills=skills,
+                    budget_min=budget_min,
+                    budget_max=budget_max,
+                    status=status,
+                    limit=limit,
+                    offset=0
                 )
 
-                new_projects.append(project)
-                stored_projects.append(project.to_dict())
-            elif project_id in existing_ids:
-                # Optionally return existing projects if they match search
-                pass
+                if p_data:
+                    filtered_projects, _ = _pre_filter_projects(
+                        projects_data=p_data,
+                        budget_min_threshold=settings.MIN_BUDGET_THRESHOLD,
+                        min_desc_length=settings.MIN_DESCRIPTION_LENGTH,
+                        allowed_statuses=normalized_allowed_statuses,
+                        enable_skill_match=True,
+                        min_submit_ts=min_submit_ts,
+                        fixed_price_only=fixed_price_only,
+                    )
 
-        if new_projects:
-            db.add_all(new_projects)
-            db.commit()
+                    with get_db_session() as background_db:
+                        for project_dict in filtered_projects:
+                            pid = project_dict.get('id')
+                            if not pid: continue
 
-    return stored_projects
+                            existing = background_db.query(Project).filter_by(freelancer_id=pid).first()
+                            if existing:
+                                _apply_project_fields(existing, project_dict)
+                            else:
+                                new_proj = Project(
+                                    freelancer_id=pid,
+                                    created_at=datetime.utcnow()
+                                )
+                                _apply_project_fields(new_proj, project_dict)
+                                background_db.add(new_proj)
+                        background_db.commit()
+                logger.info(f"Background sync completed successfully for query: {query}")
+            except Exception as e:
+                logger.error(f"Background sync failed: {e}")
+            finally:
+                _is_syncing = False
+                logger.info("Background sync lock released")
+
+    # 2. 构建本地数据库查询
+    db_query = db.query(Project)
+
+    if query:
+        db_query = db_query.filter(or_(
+            Project.title.ilike(f"%{query}%"),
+            Project.description.ilike(f"%{query}%")
+        ))
+    
+    if status:
+        db_query = db_query.filter(Project.status == status)
+    elif normalized_allowed_statuses:
+        db_query = db_query.filter(func.lower(Project.status).in_(normalized_allowed_statuses))
+
+    if fixed_price_only:
+        db_query = db_query.filter(Project.type_id == 1)
+
+    if min_submit_ts is not None:
+        cutoff_dt = datetime.utcfromtimestamp(min_submit_ts)
+        db_query = db_query.filter(Project.created_at >= cutoff_dt)
+    
+    if min_score is not None and min_score > 0:
+        db_query = db_query.filter(Project.ai_score >= min_score)
+    # 如果 min_score 为 0，我们不加过滤条件，这样 ai_score 为 None 的新项目也能显示出来
+
+    if max_score is not None and max_score > 0:
+        # 使用 OR 条件包含 NULL 值，避免排除未评分的项目
+        db_query = db_query.filter(
+            or_(
+                (Project.ai_score <= max_score),
+                (Project.ai_score.is_(None))
+            )
+        )
+
+    if budget_min is not None:
+        db_query = db_query.filter(Project.budget_maximum >= budget_min)
+
+    # 排序和分页
+    db_query = db_query.order_by(Project.created_at.desc())
+    db_projects = db_query.offset(offset).limit(limit).all()
+
+    return [p.to_dict() for p in db_projects]
 
 async def get_project_details(db: Session, project_id: int) -> Dict[str, Any]:
     """
