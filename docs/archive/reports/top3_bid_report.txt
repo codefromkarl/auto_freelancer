@@ -1,0 +1,136 @@
+
+
+########################################################################################################################
+# 评分前三的可投标项目详细报告
+# 生成时间: 2026-02-07 18:50:28.643956
+########################################################################################################################
+
+
+## 第 1 名
+
+========================================================================================================================
+项目 ID: 40135964
+评分: 6.8/10
+标题: 3D Character Animation for Entertainment -- 2
+========================================================================================================================
+
+【项目详情】
+预算: 12500.00-37500.00 INR
+状态: active
+投标数: 14
+时薪: $10.0/h
+预估工时: 80 小时
+建议投标金额: $350.00 USD
+创建时间: 2026-01-11 16:49:01.803910
+
+【项目描述】
+Looking for a Blender 3D Animator for long-term / permanent collaboration
+Channel Name: Make Joke Evil (YouTube)
+Work Type
+Mixamo rig & Mixamo website animations
+Thoda bahut hand/manual animation (simple)
+Scene-wise animation only (❌ no modeling, ❌ no texturing)
+Project Details
+6–7 minutes per video
+4 videos per month
+YouTube content (simple, non-cinematic)
+Budget
+₹18,000 – ₹23,000 per month (fixed initially)
+Long-term / permanent work
+Earning badhne par salary increment guaranteed
+I Will Provid
+... (共 746 字符)
+
+【AI 评分理由】
+Long-term project with clear deliverables and optimal competition (14 bids), but budget is extremely low ($138-415/month) resulting in poor hourly rate for animation work. Client lacks payment verification and hire history, increasing completion risk.
+
+【AI 生成的投标草稿】
+未生成投标草稿
+
+【客户信息】
+无客户信息
+
+
+## 第 2 名
+
+========================================================================================================================
+项目 ID: 40207719
+评分: 6.8/10
+标题: React UI/UX + Frontend Build — Laundry Admin Dashboard + POS
+========================================================================================================================
+
+【项目详情】
+预算: 250.00-750.00 USD
+状态: active
+投标数: 0
+时薪: $10.0/h
+预估工时: 60 小时
+建议投标金额: $650.00 USD
+创建时间: 2026-02-06 07:33:49.791640
+
+【项目描述】
+I have the backend, APIs, and a clear visual direction in place; what I still need is the full React-based frontend for a web-first laundry administration and point-of-sale system. Because the task is frontend build only, your effort will go straight into code: responsive components, state management, API wiring, and printer-ready layouts.
+
+Core screens to ship
+• Admin: customer list/detail, services & pricing maintenance, order tracker with status updates, transaction ledger, and a lightweight 
+... (共 1478 字符)
+
+【AI 评分理由】
+Project has clear scope (React dashboard + POS) with existing backend/APIs, but budget is too low for estimated workload, creating high competition risk. Payment verification unknown and client history missing add completion risk.
+
+【AI 生成的投标草稿】
+未生成投标草稿
+
+【客户信息】
+无客户信息
+
+
+## 第 3 名
+
+========================================================================================================================
+项目 ID: 40207552
+评分: 6.8/10
+标题: Workday API Integration Specialist
+========================================================================================================================
+
+【项目详情】
+预算: 12.00-40.00 GBP
+状态: active
+投标数: 0
+时薪: $10.0/h
+预估工时: 30 小时
+建议投标金额: $54.30 USD
+创建时间: 2026-02-06 07:33:49.791957
+
+【项目描述】
+I need an expert to integrate the Workday API with another system for data synchronization. 
+
+Key Requirements:
+- Experience with Workday API
+- Proven track record in system integration
+- Strong understanding of data synchronization principles
+- Ability to deliver within budget
+
+Ideal Skills:
+- API integration experience
+- Familiarity with the specific system to be integrated (Salesforce, SAP, or Microsoft Dynamics)
+- Strong problem-solving skills
+- Good communication for project updates
+
+Please
+... (共 539 字符)
+
+【AI 评分理由】
+Project has optimal hourly rate range ($20-60/h) and API integration scope is clear, but missing critical information about client verification, bid competition, and specific technical requirements reduces confidence in win rate and completion.
+
+【AI 生成的投标草稿】
+未生成投标草稿
+
+【客户信息】
+无客户信息
+
+
+########################################################################################################################
+# 报告结束
+########################################################################################################################
+

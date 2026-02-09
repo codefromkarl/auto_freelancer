@@ -1,0 +1,9 @@
+Threshold: 6.0
+Total: 3
+Filtered by remote status: 0
+
+ID       | Title                                    | Budget      | Score | Reason                                                                          
+---------+------------------------------------------+-------------+-------+---------------------------------------------------------------------------------
+40211790 | WhatsApp Order & Verification Automation | 250-750 USD | 7.2   | Project has optimal budget range and moderate competition for a newcomer, but la
+40210763 | Python Web Scraping Trial Task           | 30-250 USD  | 6.8   | Excellent newcomer project: small scope (5-10h), clear Python scraping task, opt
+40212696 | Python Game Automation Project (macOS)   | 250-750 USD | 6.2   | Project has good budget efficiency ($25-75/hour range) and clear technical focus
