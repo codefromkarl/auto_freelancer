@@ -137,8 +137,10 @@ def main(argv=None) -> int:
                 "parse_mode": "Markdown"
             }
 
+            proxies = common.get_telegram_proxies()
+
             try:
-                response = requests.post(url, json=payload, timeout=30)
+                response = requests.post(url, json=payload, timeout=30, proxies=proxies)
                 response.raise_for_status()
                 result = response.json()
 

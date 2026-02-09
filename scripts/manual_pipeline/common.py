@@ -167,6 +167,37 @@ def get_db_context() -> Generator[object, None, None]:
         session.close()
 
 
+def get_telegram_proxies() -> Optional[dict[str, str]]:
+    """
+    Build explicit Telegram proxy settings from env.
+    Prioritizes TELEGRAM_PROXY, then falls back to global proxies.
+    """
+    keys = [
+        "TELEGRAM_PROXY",
+        "TELEGRAM_HTTPS_PROXY",
+        "TELEGRAM_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    
+    proxy = None
+    for key in keys:
+        val = os.getenv(key)
+        if val and val.strip():
+            proxy = val.strip()
+            break
+            
+    if not proxy:
+        return None
+        
+    if "://" not in proxy:
+        proxy = f"http://{proxy}"
+        
+    return {"http": proxy, "https": proxy}
+
+
 class FileLock:
     def __init__(self, path: Path):
         self.path = Path(path)

@@ -145,11 +145,12 @@ def send_to_telegram(message: str) -> bool:
     try:
         import requests
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        proxies = common.get_telegram_proxies()
         response = requests.post(url, json={
             "chat_id": chat_id,
             "text": message,
             "parse_mode": "Markdown"
-        }, timeout=30)
+        }, timeout=30, proxies=proxies)
 
         if response.status_code == 200:
             print(f"✓ Telegram消息已发送")

@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+import common
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,9 +29,9 @@ class TelegramConfirm:
         self._session = requests.Session()
         # Telegram API 在国内需要代理；主进程可能已清除代理环境变量，
         # 因此从 TELEGRAM_PROXY 或常见代理变量中显式读取。
-        proxy = os.getenv("TELEGRAM_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
-        if proxy:
-            self._session.proxies = {"https": proxy, "http": proxy}
+        self._session.proxies = common.get_telegram_proxies() or {}
+        if self._session.proxies:
+            logger.debug("TelegramConfirm using proxies: %s", self._session.proxies)
 
     # ------------------------------------------------------------------
     # Public API

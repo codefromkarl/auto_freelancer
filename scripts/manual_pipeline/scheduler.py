@@ -49,6 +49,15 @@ _PROXY_ENV_KEYS = [
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "all_proxy",
 ]
+_TELEGRAM_PROXY_ENV_KEYS = [
+    "TELEGRAM_PROXY",
+    "TELEGRAM_HTTPS_PROXY",
+    "TELEGRAM_HTTP_PROXY",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+]
 
 # Graceful shutdown flag
 _shutdown = False
@@ -96,6 +105,44 @@ def _human_delay(min_sec: float = 2.0, max_sec: float = 8.0) -> None:
     """模拟人类操作间隔的随机延迟。"""
     delay = random.uniform(min_sec, max_sec)
     time.sleep(delay)
+
+
+def _first_nonempty_env(keys: List[str]) -> Optional[str]:
+    for key in keys:
+        value = os.getenv(key)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _build_telegram_proxies() -> Optional[Dict[str, str]]:
+    """Build explicit Telegram proxy settings from env."""
+    return common.get_telegram_proxies()
+
+
+def _promote_telegram_proxy_env(logger: Optional[logging.Logger] = None) -> None:
+    """
+    Preserve a Telegram-specific proxy before global proxy cleanup.
+
+    Scheduler usually clears global proxy variables for pipeline stability.
+    Telegram requests are isolated to TELEGRAM_PROXY so notifications can still work.
+    """
+    # If already set, we are good
+    if os.getenv("TELEGRAM_PROXY"):
+        if logger:
+            logger.debug("TELEGRAM_PROXY already set: %s", os.getenv("TELEGRAM_PROXY"))
+        return
+
+    # Look for any existing proxy to promote
+    proxies = common.get_telegram_proxies()
+    if proxies:
+        proxy_url = proxies["https"]
+        os.environ["TELEGRAM_PROXY"] = proxy_url
+        if logger:
+            logger.info("Promoted %s to TELEGRAM_PROXY", proxy_url)
+    else:
+        if logger:
+            logger.debug("No proxy found to promote to TELEGRAM_PROXY")
 
 
 # ============================================================================
@@ -442,11 +489,18 @@ def _send_telegram_notification(
 
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        resp = requests.post(url, json={
+        request_kwargs: Dict[str, Any] = {
+            "json": {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "Markdown",
-        }, timeout=15)
+            },
+            "timeout": 15,
+        }
+        proxies = _build_telegram_proxies()
+        if proxies:
+            request_kwargs["proxies"] = proxies
+        resp = requests.post(url, **request_kwargs)
         if resp.status_code == 200:
             logger.info("Telegram notification sent for %d bids", len(submitted))
         else:
@@ -721,6 +775,8 @@ def main(argv=None) -> int:
     except Exception as exc:
         print(f"Failed to load settings: {exc}")
         return common.EXIT_VALIDATION_ERROR
+
+    _promote_telegram_proxy_env(logger)
 
     if not args.keep_proxy:
         for key in _PROXY_ENV_KEYS:
