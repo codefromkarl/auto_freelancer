@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 from database.models import Bid, Project, AuditLog
 from services.freelancer_client import get_freelancer_client, FreelancerAPIError
 from services.proposal_service import get_proposal_service, ProposalService
+from utils.currency_converter import get_currency_converter
 
 BIDDABLE_REMOTE_STATUSES = {"open", "active", "open_for_bidding"}
 
@@ -81,6 +82,43 @@ def _extract_bid_ids(
         bidder_id = fallback_bidder_id
 
     return bid_id, bidder_id
+
+
+def _is_same_amount(value_a: float, value_b: float, epsilon: float = 0.01) -> bool:
+    return abs(float(value_a) - float(value_b)) <= epsilon
+
+
+def _resolve_submission_amount(project: Project, amount: float) -> float:
+    """Resolve outgoing bid amount in project's native currency.
+
+    `project.suggested_bid` is stored in USD. When callers pass that value directly
+    for non-USD projects, convert it back to project currency before submission.
+    """
+    project_currency = (project.currency_code or "USD").upper()
+    if project_currency == "USD":
+        return float(amount)
+
+    suggested_bid_usd = float(project.suggested_bid) if project.suggested_bid is not None else None
+    if suggested_bid_usd is None or not _is_same_amount(float(amount), suggested_bid_usd):
+        return float(amount)
+
+    converter = get_currency_converter()
+    rate_to_usd = converter.get_rate_sync(project_currency)
+    if rate_to_usd is None or rate_to_usd <= 0:
+        raise ValueError(
+            f"Cannot convert USD suggested bid to {project_currency}: missing exchange rate."
+        )
+
+    converted = round(float(amount) / rate_to_usd, 2)
+    logger.info(
+        "Converted suggested_bid from USD to project currency. project_id=%s amount_usd=%.2f %s=%.2f rate_to_usd=%s",
+        project.freelancer_id,
+        float(amount),
+        project_currency,
+        converted,
+        rate_to_usd,
+    )
+    return converted
 
 
 def check_content_risk(description: str, project: Project) -> Tuple[bool, str]:
@@ -160,6 +198,29 @@ async def validate_project_biddable_now(
     return True, "ok"
 
 
+def _beautify_amount(amount: float, currency: str) -> float:
+    """Make the bid amount look more 'human' by rounding to natural increments."""
+    val = float(amount)
+    currency = (currency or "USD").upper()
+    
+    # Large currencies like INR, JPY, IDR
+    if val > 1000:
+        # Round to nearest 50 or 100
+        if val > 5000:
+            return float(round(val / 100) * 100)
+        return float(round(val / 50) * 50)
+    
+    # Medium currencies like USD, EUR, GBP
+    if val > 100:
+        return float(round(val / 10) * 10)
+    
+    # Small amounts
+    if val > 20:
+        return float(round(val / 5) * 5)
+    
+    return float(round(val))
+
+
 async def create_bid(
     db: Session,
     project_id: int,
@@ -198,12 +259,16 @@ async def create_bid(
                 f"Project is not biddable now. {reason}"
             )
 
+    resolved_amount = _resolve_submission_amount(project, amount)
+    # Beautify the amount after conversion
+    resolved_amount = _beautify_amount(resolved_amount, project.currency_code)
+
     # 1c. Bid amount range validation
     ABS_MIN_AMOUNT = 5.0
     ABS_MAX_AMOUNT = 50000.0
-    if amount < ABS_MIN_AMOUNT or amount > ABS_MAX_AMOUNT:
+    if resolved_amount < ABS_MIN_AMOUNT or resolved_amount > ABS_MAX_AMOUNT:
         raise ValueError(
-            f"Bid amount ${amount:.2f} is outside the absolute allowed range "
+            f"Bid amount ${resolved_amount:.2f} is outside the absolute allowed range "
             f"(${ABS_MIN_AMOUNT:.0f} - ${ABS_MAX_AMOUNT:.0f})."
         )
     if project.budget_minimum is not None and project.budget_maximum is not None:
@@ -212,9 +277,9 @@ async def create_bid(
         if budget_min > 0 and budget_max > 0:
             lower_bound = budget_min * 0.5
             upper_bound = budget_max * 1.5
-            if amount < lower_bound or amount > upper_bound:
+            if resolved_amount < lower_bound or resolved_amount > upper_bound:
                 raise ValueError(
-                    f"Bid amount ${amount:.2f} is outside the acceptable range "
+                    f"Bid amount ${resolved_amount:.2f} is outside the acceptable range "
                     f"(${lower_bound:.2f} - ${upper_bound:.2f}) based on project budget "
                     f"${budget_min:.0f} - ${budget_max:.0f}."
                 )
@@ -225,7 +290,12 @@ async def create_bid(
         # 使用新的 ProposalService 生成提案
         try:
             proposal_service = get_proposal_service()
-            proposal_result = await proposal_service.generate_proposal(project, db=db)
+            # Pass the ALREADY RESOLVED and BEAUTIFIED amount to the proposal generator
+            score_data = {
+                "suggested_bid": resolved_amount,
+                "estimated_hours": getattr(project, "estimated_hours", None)
+            }
+            proposal_result = await proposal_service.generate_proposal(project, score_data=score_data, db=db)
             if proposal_result.get("success"):
                 bid_description = proposal_result.get("proposal", "")
                 # 保存生成的提案到项目记录
@@ -266,7 +336,7 @@ async def create_bid(
     try:
         result = await client.create_bid(
             project_id=project_id,
-            amount=amount,
+            amount=resolved_amount,
             period=period,
             description=bid_description,
         )
@@ -276,7 +346,7 @@ async def create_bid(
             action="create_bid",
             entity_type="bid",
             entity_id=project_id,  # Using project ID as proxy entity ID for failed bid
-            request_data=f"amount={amount}, period={period}",
+            request_data=f"amount={resolved_amount}, period={period}",
             response_data=e.message,
             status="error",
             error_message=e.message,
@@ -300,7 +370,7 @@ async def create_bid(
             action="create_bid",
             entity_type="bid",
             entity_id=project_id,
-            request_data=f"amount={amount}, period={period}",
+            request_data=f"amount={resolved_amount}, period={period}",
             response_data=str(result),
             status="success_without_local_bid_id",
         )
@@ -309,7 +379,7 @@ async def create_bid(
         return {
             "bid_id": None,
             "project_id": project_id,
-            "amount": amount,
+            "amount": resolved_amount,
             "period": period,
             "description": bid_description,
             "status": "submitted_remote_only",
@@ -325,7 +395,7 @@ async def create_bid(
         project_id=project.id,
         project_freelancer_id=project_id,
         bidder_id=bidder_id,
-        amount=amount,
+        amount=resolved_amount,
         period=period,
         description=bid_description,
         status="active",
@@ -338,7 +408,7 @@ async def create_bid(
         action="create_bid",
         entity_type="bid",
         entity_id=bid.freelancer_bid_id,
-        request_data=f"amount={amount}, period={period}",
+        request_data=f"amount={resolved_amount}, period={period}",
         response_data=str(result),
         status="success",
     )
@@ -349,7 +419,7 @@ async def create_bid(
     return {
         "bid_id": bid.freelancer_bid_id,
         "project_id": project_id,
-        "amount": amount,
+        "amount": resolved_amount,
         "period": period,
         "description": bid_description,
         "status": "submitted",

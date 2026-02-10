@@ -17,7 +17,12 @@ from utils.currency_converter import get_currency_converter
 
 logger = logging.getLogger(__name__)
 _BIDDABLE_STATUSES = {"open", "active", "open_for_bidding"}
-_STICKY_LOCAL_STATUSES = {"bid_submitted", "skills_blocked"}
+_STICKY_LOCAL_STATUSES = {
+    "bid_submitted",
+    "skills_blocked",
+    "preferred_only",
+    "escrow_required",
+}
 
 
 def _check_skill_match(project_dict: Dict[str, Any]) -> bool:

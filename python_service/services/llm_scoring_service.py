@@ -139,10 +139,7 @@ EVALUATION WORKFLOW:
    - Never boost score only because budget is large.
 
 4. Assess Competition:
-   - 0-4 bids: SUSPICIOUS - likely low quality (Score 2)
-   - 5-20 bids: OPTIMAL for win rate (Score 10)
-   - 21-40 bids: MODERATE competition (Score 6)
-   - >40 bids: HIGH competition - hard to win (Score 2)
+   - Competition level should NOT negatively impact the score. Whether a project has 5 or 100 bids, evaluate it based on its own merits (clarity, budget, fit).
    - New projects (<24h old): BONUS - slightly higher score
 
 5. Identify Risks & Clarity:
@@ -151,23 +148,16 @@ EVALUATION WORKFLOW:
    - Long descriptions without technical details are LOW QUALITY signals
 
 SCORING CRITERIA (0-10) - WIN RATE OPTIMIZED:
-- Budget Efficiency (15%): $20-60/h is optimal. High rates ($80+) hurt win rate.
-- Competition (25%): 5-20 bids is optimal. Too few = bad project, too many = hard to win.
-- Requirement Clarity (25%): Specific deliverables and acceptance criteria required.
-- Client Trust (20%): Payment verification and hire rate are CRITICAL for completion.
-- Technical Match (10%): Must fit standard stacks (Python, API, automation).
+- Budget Efficiency (20%): $20-60/h is optimal.
+- Requirement Clarity (30%): Specific deliverables and acceptance criteria required.
+- Client Trust (25%): Payment verification and hire rate are CRITICAL for completion.
+- Technical Match (20%): Must fit standard stacks (Python, API, automation).
 - Risk Assessment (5%): Overall project risk evaluation.
 
 SCORING RULES (WIN RATE FOCUS):
 - Hourly rate $20-60 MUST result in Budget score >= 8.0.
-- Hourly rate $80+ MUST result in Budget score <= 6.0 (hard to win).
 - Payment verified = Client score bonus. Payment NOT verified = Client score 5.0 (neutral, not penalized).
 - Client info MISSING (no data available) = Client score 6.0 (assume average, do NOT penalize).
-- New client with 0 projects but payment verified = Client score 6.0 (acceptable risk).
-- Bid count 5-20 MUST result in Competition score >= 8.0.
-- Bid count 0-4 MUST result in Competition score <= 3.0 (suspicious).
-- Bid count MISSING (no data) = Competition score 6.0 (assume moderate, do NOT penalize).
-- If project is very large/complex for newcomer, final score should be reduced.
 - Small clear tasks are valid bidding targets and can receive high scores.
 
 Return strict JSON only:
@@ -236,8 +226,9 @@ class LLMProvider(ABC):
 
         if not parsed:
             logger.error(
-                f"Could not extract valid JSON from {model} response. Content snippet: {content[:200]}"
+                f"Could not extract valid JSON from {model} response. Content snippet: {content[:500]}"
             )
+            print(f"DEBUG: LLM failed response: {content}")
             return None
 
         try:
@@ -403,6 +394,8 @@ class LLMScoringService:
 
     def _prepare_project_payload(self, project: Project) -> Dict[str, Any]:
         """Prepare project data for LLM scoring (Forces USD conversion)."""
+        import ast
+
         converter = get_currency_converter()
         currency_code = project.currency_code or "USD"
 
@@ -427,6 +420,19 @@ class LLMScoringService:
             (budget_max * rate) if budget_max > 0 and rate is not None else None
         )
 
+        def safe_json_or_eval(data):
+            if not data:
+                return None
+            if isinstance(data, dict):
+                return data
+            try:
+                return json.loads(data)
+            except Exception:
+                try:
+                    return ast.literal_eval(data)
+                except Exception:
+                    return data
+
         return {
             "id": project.freelancer_id,
             "title": project.title,
@@ -436,10 +442,8 @@ class LLMScoringService:
             "currency_code": "USD",  # Explicitly tell LLM it's USD
             "original_currency": currency_code,
             "skills": project.skills,
-            "bid_stats": json.loads(project.bid_stats) if project.bid_stats else None,
-            "owner_info": json.loads(project.owner_info)
-            if project.owner_info
-            else None,
+            "bid_stats": safe_json_or_eval(project.bid_stats),
+            "owner_info": safe_json_or_eval(project.owner_info),
         }
 
     def _calculate_project_avg_budget_usd(self, project: Project) -> Optional[float]:
@@ -468,6 +472,7 @@ class LLMScoringService:
 
     def _extract_bid_count(self, project: Project) -> int:
         """Extract bid_count from project.bid_stats JSON/string payload."""
+        import ast
         raw = getattr(project, "bid_stats", None)
         if not raw:
             return 0
@@ -475,10 +480,14 @@ class LLMScoringService:
             return int(raw.get("bid_count") or 0)
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return int(parsed.get("bid_count") or 0)
         except Exception:
-            return 0
+            try:
+                parsed = ast.literal_eval(raw)
+            except Exception:
+                return 0
+
+        if isinstance(parsed, dict):
+            return int(parsed.get("bid_count") or 0)
         return 0
 
     def _apply_bid_profile_score_adjustment(
@@ -524,12 +533,6 @@ class LLMScoringService:
         # Very low effective hourly rate is unattractive even for newcomer.
         if rate > 0 and rate < 10:
             adjusted -= 0.8
-
-        # Competition sweet spot for practical win-rate.
-        if 5 <= bid_count <= 35:
-            adjusted += 0.2
-        elif bid_count > 50:
-            adjusted -= 0.3
 
         return round(max(0.0, min(10.0, adjusted)), 2)
 

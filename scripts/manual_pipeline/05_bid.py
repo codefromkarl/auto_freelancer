@@ -104,6 +104,8 @@ def _save_preview_archive(
     title: str,
     amount: float,
     currency: str,
+    input_amount: float | None = None,
+    input_currency: str | None = None,
     period: int,
     proposal_source: str,
     proposal: str,
@@ -119,12 +121,22 @@ def _save_preview_archive(
     milestones = _build_milestones(period, proposal)
     milestone_lines = "\n".join([f"{idx}. {item}" for idx, item in enumerate(milestones, start=1)])
 
+    amount_meta_lines = []
+    if (
+        input_amount is not None
+        and input_currency
+        and abs(float(input_amount) - float(amount)) > 0.01
+    ):
+        amount_meta_lines.append(f"- Input Amount: {float(input_amount):.2f} {input_currency}")
+    amount_meta_lines.append(f"- Submission Amount: {float(amount):.2f} {currency}")
+    amount_meta_text = "\n".join(amount_meta_lines)
+
     text = (
         "# Bid Preview Archive\n\n"
         f"- Timestamp: {datetime.now().isoformat(timespec='seconds')}\n"
         f"- Project ID: {project_id}\n"
         f"- Title: {title}\n"
-        f"- Amount: {amount} {currency}\n"
+        f"{amount_meta_text}\n"
         f"- Period: {period} days\n"
         f"- Proposal Source: {proposal_source}\n\n"
         "## Structured Bid Summary\n\n"
@@ -370,6 +382,30 @@ def main(argv=None) -> int:
                         print("Invalid bid amount.")
                         return common.EXIT_VALIDATION_ERROR
 
+            input_amount = float(amount)
+            project_currency = project.currency_code or "USD"
+            suggested_bid_usd = (
+                float(project.suggested_bid)
+                if project.suggested_bid is not None
+                else None
+            )
+            try:
+                submission_amount = float(
+                    bid_service._resolve_submission_amount(project, input_amount)
+                )
+            except ValueError as exc:
+                print(f"Failed to resolve submission amount: {exc}")
+                return common.EXIT_VALIDATION_ERROR
+
+            converted_for_submission = abs(submission_amount - input_amount) > 0.01
+            input_amount_currency = project_currency
+            if (
+                converted_for_submission
+                and suggested_bid_usd is not None
+                and abs(input_amount - suggested_bid_usd) <= 0.01
+            ):
+                input_amount_currency = "USD"
+
             if args.proposal and not args.allow_manual_proposal:
                 print(
                     "Manual proposal is disabled by default for compliance. "
@@ -388,7 +424,7 @@ def main(argv=None) -> int:
                 proposal_service = get_proposal_service()
                 used_fallback = False
                 score_data = {
-                    "suggested_bid": float(amount),
+                    "suggested_bid": float(submission_amount),
                     "estimated_hours": int(project.estimated_hours)
                     if getattr(project, "estimated_hours", None) is not None
                     else None,
@@ -444,8 +480,8 @@ def main(argv=None) -> int:
 
                 proposal = _align_proposal_with_amount(
                     proposal,
-                    float(amount),
-                    project.currency_code or "USD",
+                    float(submission_amount),
+                    project_currency,
                 )
 
                 content_safe, risk_reason = bid_service.check_content_risk(proposal, project)
@@ -458,7 +494,11 @@ def main(argv=None) -> int:
             print("-" * 40)
             print(f"Project ID: {project.freelancer_id}")
             print(f"Title: {project.title}")
-            print(f"Amount: {amount} {project.currency_code}")
+            if converted_for_submission:
+                print(f"Amount (input): {input_amount:.2f} {input_amount_currency}")
+                print(f"Amount (to submit): {submission_amount:.2f} {project_currency}")
+            else:
+                print(f"Amount: {submission_amount:.2f} {project_currency}")
             print(f"Period: {args.period} days")
             print(f"Proposal Source: {proposal_source}")
             print("Proposal:")
@@ -471,8 +511,10 @@ def main(argv=None) -> int:
                         Path(args.preview_archive_dir),
                         project_id=project.freelancer_id,
                         title=project.title or "",
-                        amount=float(amount),
-                        currency=project.currency_code or "USD",
+                        amount=float(submission_amount),
+                        currency=project_currency,
+                        input_amount=float(input_amount),
+                        input_currency=input_amount_currency,
                         period=args.period,
                         proposal_source=proposal_source,
                         proposal=proposal,
@@ -503,7 +545,7 @@ def main(argv=None) -> int:
                     bid_service.create_bid(
                         db,
                         project_id=project.freelancer_id,
-                        amount=amount,
+                        amount=submission_amount,
                         period=args.period,
                         description=proposal,
                         validate_remote_status=False,

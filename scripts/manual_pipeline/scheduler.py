@@ -301,8 +301,6 @@ def select_bid_candidates(
             .filter(func.lower(Project.status).in_(allowed_statuses))
             .filter(Project.created_at >= cutoff)
             .filter(~Project.freelancer_id.in_(already_bid_subq))
-            # Only bid on USD projects (avoid currency mismatch)
-            .filter(func.upper(Project.currency_code) == "USD")
         )
         if fixed_price_only:
             query = query.filter(or_(Project.type_id == 1, Project.type_id.is_(None)))
@@ -378,17 +376,19 @@ async def _step_auto_bid(
         if amount is None:
             logger.warning("Cannot determine bid amount for project %s, skipping", pid)
             continue
+        currency = candidate.get("currency_code") or "USD"
 
         period = _determine_bid_period(candidate)
 
         if dry_run:
             logger.info(
-                "[DRY RUN] Would bid on project %s: $%.2f, %d days (score=%.1f)",
-                pid, amount, period, candidate.get("ai_score", 0),
+                "[DRY RUN] Would bid on project %s: %.2f %s, %d days (score=%.1f)",
+                pid, amount, currency, period, candidate.get("ai_score", 0),
             )
             bid_results.append({
                 "project_id": pid,
                 "amount": amount,
+                "currency": currency,
                 "period": period,
                 "status": "dry_run",
                 "title": candidate.get("title", ""),
@@ -405,6 +405,7 @@ async def _step_auto_bid(
                     description=None,  # Let ProposalService generate
                     validate_remote_status=True,
                 )
+                submitted_amount = float(result.get("amount", amount)) if isinstance(result, dict) else float(amount)
                 # Mark project as bid_submitted
                 project = db.query(Project).filter_by(freelancer_id=pid).first()
                 if project:
@@ -412,12 +413,13 @@ async def _step_auto_bid(
                     db.commit()
 
                 logger.info(
-                    "✅ Bid submitted: project=%s amount=$%.2f period=%d",
-                    pid, amount, period,
+                    "✅ Bid submitted: project=%s amount=%.2f %s period=%d",
+                    pid, submitted_amount, currency, period,
                 )
                 bid_results.append({
                     "project_id": pid,
-                    "amount": amount,
+                    "amount": submitted_amount,
+                    "currency": currency,
                     "period": period,
                     "status": "submitted",
                     "title": candidate.get("title", ""),
@@ -479,7 +481,7 @@ def _send_telegram_notification(
     for r in submitted:
         lines.append(
             f"• *{r.get('title', '')[:50]}*\n"
-            f"  💰 ${r['amount']:.0f} | ⏱ {r['period']}d\n"
+            f"  💰 {r['amount']:.0f} {r.get('currency', 'USD')} | ⏱ {r['period']}d\n"
             f"  🔗 https://www.freelancer.com/projects/{r['project_id']}\n"
         )
 
