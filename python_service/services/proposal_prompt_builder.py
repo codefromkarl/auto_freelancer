@@ -204,7 +204,7 @@ class ProposalPromptBuilder:
         hard_char_max = max(target_char_max, int(getattr(settings, "PROPOSAL_MAX_LENGTH", 1800)))
 
         # 组装完整提示词
-        full_prompt = f"""你是 Freelancer 平台的资深开发者，擅长撰写高中标率的提案。
+        full_prompt = f"""You are a senior freelance developer on Freelancer.com, known for winning high-quality projects through personalized, technical, and persuasive proposals.
 
 {project_context}
 
@@ -216,17 +216,17 @@ class ProposalPromptBuilder:
 
 {structure_section}
 
-请基于以上信息，生成一个专业的、自由职业者风格的提案文本。
+Please generate a professional, person-to-person proposal based on the information above.
 
-要求：
-- 语言风格：必须全程使用英文（English only），从第一句开始直接英文生成，禁止先写中文再翻译
-- 长度控制：目标 {target_char_min}-{target_char_max} 字符；硬上限不超过 {hard_char_max} 字符
-- 输出格式：仅输出提案文本内容，不要包含 JSON 或其他包装
-- 自然真实：避免模板化、机械化的表达
-- 针对性：紧密围绕客户的具体需求展开
-- **关键词引用**：必须在投标中自然地引用项目标题中的核心关键词（如技术栈、项目类型等），以展示对项目的理解
-- **风控兼容关键词**：正文中必须自然包含以下词汇中的至少两个：technical, implementation, delivery, plan, approach, solution
-- **预算表述**：必须包含单词 budget，并给出清晰的预算/报价讨论语句
+Requirements:
+- Language: English only. Write directly in English, do not translate from Chinese.
+- Length: Target {target_char_min}-{target_char_max} characters; Hard limit {hard_char_max} characters.
+- Tone: Professional, confident, and consultative. Avoid generic "I am an expert" phrases. Instead, show expertise through technical insight.
+- Natural Expression: Do NOT use bold text for keywords. Avoid excessive Markdown formatting. No bullet points or numbered lists; use natural paragraphs.
+- Specificity: Reference specific technologies or requirements mentioned in the project title and description to show you've read it carefully.
+- **Critical Keywords**: Naturally incorporate at least two of these words: technical, implementation, delivery, plan, approach, solution.
+- **Budget**: Must include the word "budget" and discuss the quote/timeline realistically.
+- **Closing**: End with a thoughtful, project-specific clarifying question that invites the client to start a conversation.
 """
 
         return full_prompt

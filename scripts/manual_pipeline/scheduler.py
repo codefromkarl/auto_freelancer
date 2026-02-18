@@ -8,7 +8,7 @@ Only bids on new high-scoring projects that pass all quality gates.
 Schedule modes:
     Day   (08:00-24:00): fetch → score → bid, 5-10 min random interval
     Night (00:00-08:00): fetch → score only, candidates accumulated;
-                         at 08:00 batch-push to Telegram for manual approval
+                         at 08:00 batch-push to Telegram for notification, then auto-bid
 
 Usage:
     python scheduler.py                          # default: 5-min interval
@@ -27,6 +27,7 @@ import logging
 import os
 import random
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -62,7 +63,7 @@ _TELEGRAM_PROXY_ENV_KEYS = [
 # Graceful shutdown flag
 _shutdown = False
 
-# 夜间积累的候选项目（跨 cycle 持久化，8:00 统一推送）
+# 夜间积累的候选项目（跨 cycle 持久化，8:00 统一通知并自动投标）
 _night_candidates: List[Dict[str, Any]] = []
 
 
@@ -195,7 +196,7 @@ async def _step_fetch_competitor_bids(
     concurrency: int,
     logger: logging.Logger,
 ) -> int:
-    """Fetch competitor bids for projects with bid_count > 0."""
+    """Fetch competitor bids for market-active projects and all our bidded projects."""
     from database.models import Project
     from services import competitor_bid_service
 
@@ -210,7 +211,8 @@ async def _step_fetch_competitor_bids(
             query = query.filter(or_(Project.type_id == 1, Project.type_id.is_(None)))
         projects = query.all()
 
-        eligible = []
+        eligible = set()
+        bid_stats_ids = set()
         for p in projects:
             bid_stats = {}
             if p.bid_stats:
@@ -219,16 +221,28 @@ async def _step_fetch_competitor_bids(
                 except (json.JSONDecodeError, TypeError):
                     pass
             if bid_stats.get("bid_count", 0) > 0:
-                eligible.append(p.freelancer_id)
+                eligible.add(p.freelancer_id)
+                bid_stats_ids.add(p.freelancer_id)
+
+        # Ensure coverage for all projects we have already bid on.
+        bidded_ids = competitor_bid_service.get_bidded_project_ids(db, since_days=None)
+        eligible.update(bidded_ids)
 
         if not eligible:
             return 0
 
+        eligible_list = sorted(eligible)
         results = await competitor_bid_service.batch_fetch_bids(
-            db, eligible, concurrency=concurrency,
+            db, eligible_list, concurrency=concurrency,
         )
         total = sum(results.values())
-        logger.info("Fetched %d competitor bids for %d projects", total, len(eligible))
+        logger.info(
+            "Fetched %d competitor bids for %d projects (with_bids=%d, bidded=%d)",
+            total,
+            len(eligible_list),
+            len(bid_stats_ids),
+            len(bidded_ids),
+        )
         return total
 
 
@@ -450,11 +464,29 @@ async def _step_auto_bid(
                     "error": error_text,
                 })
             except Exception as exc:
+                error_str = str(exc)
                 logger.error("Bid error for project %s: %s", pid, exc)
+                # Mark permanently unbiddable projects to prevent retry loops
+                permanent_block = None
+                if "Object doesn't exist" in error_str or "Project not found" in error_str:
+                    permanent_block = "not_found"
+                elif "not biddable now" in error_str:
+                    permanent_block = "not_biddable"
+                elif "outside the absolute allowed range" in error_str:
+                    permanent_block = "amount_out_of_range"
+                if permanent_block:
+                    try:
+                        project = db.query(Project).filter_by(freelancer_id=pid).first()
+                        if project:
+                            project.status = permanent_block
+                            db.commit()
+                            logger.info("Marked project %s as '%s'", pid, permanent_block)
+                    except Exception:
+                        db.rollback()
                 bid_results.append({
                     "project_id": pid,
                     "status": "error",
-                    "error": str(exc),
+                    "error": error_str,
                 })
 
     return bid_results
@@ -511,6 +543,42 @@ def _send_telegram_notification(
         logger.warning("Failed to send Telegram notification: %s", exc)
 
 
+def _step_generate_weekly_report(
+    since_days: int,
+    output_path: str,
+    sync_awards: bool,
+    logger: logging.Logger,
+) -> str:
+    """Generate weekly bid outcome report by invoking report script."""
+    script_path = common.REPO_ROOT / "scripts" / "utils" / "bid_outcome_weekly_report.py"
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--since-days",
+        str(since_days),
+        "--output",
+        str(output_path),
+    ]
+    cmd.append("--sync-awards" if sync_awards else "--no-sync-awards")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        raise RuntimeError(
+            f"weekly report failed (code={result.returncode}): {stderr or stdout or 'unknown error'}"
+        )
+
+    if result.stdout:
+        logger.info("Weekly report generated: %s", result.stdout.strip())
+    return str(output_path)
+
+
 # ============================================================================
 # Main cycle
 # ============================================================================
@@ -528,6 +596,10 @@ async def run_cycle(
     confirm_enabled: bool = False,
     confirm_timeout: int = 300,
     skip_bid: bool = False,
+    weekly_report_enabled: bool = True,
+    weekly_report_since_days: int = 7,
+    weekly_report_output: Optional[str] = None,
+    weekly_report_sync_awards: bool = False,
 ) -> Dict[str, Any]:
     """Execute one full pipeline cycle. Returns summary dict.
 
@@ -537,6 +609,22 @@ async def run_cycle(
     """
     cycle_start = time.monotonic()
     summary: Dict[str, Any] = {"timestamp": datetime.utcnow().isoformat()}
+    report_output = weekly_report_output or str(common.REPO_ROOT / "logs" / "bid_outcome_weekly_report.md")
+
+    def _attach_weekly_report() -> None:
+        if not weekly_report_enabled:
+            return
+        try:
+            generated = _step_generate_weekly_report(
+                since_days=weekly_report_since_days,
+                output_path=report_output,
+                sync_awards=weekly_report_sync_awards,
+                logger=logger,
+            )
+            summary["weekly_report_generated"] = generated
+        except Exception as exc:
+            logger.error("Weekly report generation failed: %s", exc)
+            summary["weekly_report_error"] = str(exc)
 
     # Step 1: Fetch projects
     logger.info("── Step 1/4: Fetching projects ──")
@@ -569,6 +657,7 @@ async def run_cycle(
         summary["bids_submitted"] = 0
         summary["bids_failed"] = 0
         summary["night_candidates"] = candidates
+        _attach_weekly_report()
         elapsed = time.monotonic() - cycle_start
         summary["elapsed_seconds"] = round(elapsed, 1)
         return summary
@@ -611,6 +700,7 @@ async def run_cycle(
                     summary["bids_submitted"] = 0
                     summary["bids_failed"] = 0
                     summary["confirm_result"] = "none_approved"
+                    _attach_weekly_report()
                     return summary
                 summary["confirm_result"] = f"{len(candidates)}_approved"
             else:
@@ -635,6 +725,7 @@ async def run_cycle(
         summary["bids_submitted"] = 0
         summary["bids_failed"] = 0
 
+    _attach_weekly_report()
     elapsed = time.monotonic() - cycle_start
     summary["elapsed_seconds"] = round(elapsed, 1)
     return summary
@@ -646,7 +737,7 @@ async def _morning_batch_bid(
     confirm_timeout: int,
     logger: logging.Logger,
 ) -> Dict[str, Any]:
-    """8:00 起床批次：将夜间积累的候选统一推送 Telegram 确认后投标。"""
+    """8:00 起床批次：将夜间积累的候选推送 Telegram 确认，等待用户决策后投标。"""
     summary: Dict[str, Any] = {}
     if not candidates:
         logger.info("Morning batch: no night candidates to process")
@@ -657,29 +748,35 @@ async def _morning_batch_bid(
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not bot_token or not chat_id:
-        logger.warning("Morning batch: Telegram not configured, skipping")
+    if bot_token and chat_id:
+        try:
+            from telegram_confirm import TelegramConfirm
+
+            confirmer = TelegramConfirm(bot_token, chat_id, confirm_timeout)
+            msg_id = confirmer.send_candidates(candidates)
+            candidates = confirmer.wait_for_decisions(msg_id, candidates)
+            logger.info(
+                "Morning batch: %d/%d candidates approved via Telegram",
+                len(candidates), len(candidates),
+            )
+        except Exception as exc:
+            logger.error(
+                "Morning batch Telegram confirmation failed: %s", exc,
+            )
+            candidates = []  # 安全默认：不投标
+    else:
+        logger.warning(
+            "Morning batch: Telegram not configured, proceeding without confirmation",
+        )
+
+    if not candidates:
+        logger.info("Morning batch: no candidates approved, skipping bid")
         summary["bids_submitted"] = 0
+        summary["bids_failed"] = 0
         return summary
 
-    from telegram_confirm import TelegramConfirm
-
-    confirmer = TelegramConfirm(bot_token, chat_id, confirm_timeout)
-    try:
-        msg_id = confirmer.send_candidates(candidates)
-        approved = confirmer.wait_for_decisions(msg_id, candidates)
-    except Exception as exc:
-        logger.error("Morning batch Telegram confirmation failed: %s", exc)
-        summary["bids_submitted"] = 0
-        return summary
-
-    if not approved:
-        logger.info("Morning batch: no candidates approved")
-        summary["bids_submitted"] = 0
-        return summary
-
-    logger.info("Morning batch: %d/%d approved, bidding...", len(approved), len(candidates))
-    bid_results = await _step_auto_bid(approved, dry_run, logger)
+    logger.info("Morning batch: bidding on %d approved candidates...", len(candidates))
+    bid_results = await _step_auto_bid(candidates, dry_run, logger)
     summary["bids_submitted"] = sum(
         1 for r in bid_results if r.get("status") in ("submitted", "dry_run")
     )
@@ -764,6 +861,35 @@ def main(argv=None) -> int:
         "--no-night-mode", action="store_true",
         help="Disable night mode, run 24h with same behavior",
     )
+    parser.add_argument(
+        "--weekly-report",
+        dest="weekly_report",
+        action="store_true",
+        help="Generate bid outcome weekly report each cycle (default: on)",
+    )
+    parser.add_argument(
+        "--no-weekly-report",
+        dest="weekly_report",
+        action="store_false",
+        help="Disable weekly report generation in scheduler",
+    )
+    parser.add_argument(
+        "--weekly-report-since-days",
+        type=int,
+        default=7,
+        help="Lookback days for weekly report (default: 7)",
+    )
+    parser.add_argument(
+        "--weekly-report-output",
+        default=str(common.REPO_ROOT / "logs" / "bid_outcome_weekly_report.md"),
+        help="Output path for weekly report",
+    )
+    parser.add_argument(
+        "--weekly-report-sync-awards",
+        action="store_true",
+        help="Sync award data when generating weekly report (default: off)",
+    )
+    parser.set_defaults(weekly_report=True)
     args = parser.parse_args(argv)
 
     logger = common.setup_logging(
@@ -783,6 +909,15 @@ def main(argv=None) -> int:
     if not args.keep_proxy:
         for key in _PROXY_ENV_KEYS:
             os.environ.pop(key, None)
+    else:
+        # httpx (used by openai/anthropic SDKs) does not support socks proxies.
+        # Remove ALL_PROXY/all_proxy if they use socks:// to avoid breaking LLM calls,
+        # while keeping HTTP_PROXY/HTTPS_PROXY (http://) intact.
+        for key in ("ALL_PROXY", "all_proxy"):
+            val = os.environ.get(key, "")
+            if val.startswith("socks"):
+                os.environ.pop(key, None)
+                logger.info("Removed %s=%s (socks not supported by httpx)", key, val)
 
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
     allowed_statuses = common.parse_statuses(args.allowed_statuses)
@@ -859,6 +994,10 @@ def main(argv=None) -> int:
                 confirm_enabled=args.confirm and not night_mode,
                 confirm_timeout=args.confirm_timeout,
                 skip_bid=night_mode,
+                weekly_report_enabled=args.weekly_report,
+                weekly_report_since_days=args.weekly_report_since_days,
+                weekly_report_output=args.weekly_report_output,
+                weekly_report_sync_awards=args.weekly_report_sync_awards,
             ))
 
             # 夜间模式：积累候选

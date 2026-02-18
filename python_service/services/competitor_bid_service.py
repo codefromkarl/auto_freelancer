@@ -12,18 +12,66 @@ from __future__ import annotations
 import asyncio
 import logging
 import statistics
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from database.models import CompetitorBid, Project
+from database.models import Bid, CompetitorBid, CompetitorBidContent, Project
 from services.freelancer_client import FreelancerAPIError, get_freelancer_client
 
 logger = logging.getLogger(__name__)
 
 # Default concurrency for batch operations
 _DEFAULT_CONCURRENCY = 5
+
+
+# ---------------------------------------------------------------------------
+# Schema helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_competitor_bid_content_table(db: Session) -> None:
+    """Create competitor_bid_contents table/indexes if they do not exist."""
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS competitor_bid_contents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bid_id INTEGER NOT NULL UNIQUE,
+                project_id INTEGER NOT NULL,
+                project_freelancer_id INTEGER NOT NULL,
+                bidder_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                fetched_at DATETIME
+            )
+            """
+        )
+    )
+    db.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_competitor_bid_content_project "
+            "ON competitor_bid_contents(project_freelancer_id)"
+        )
+    )
+    db.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS idx_competitor_bid_content_bidder "
+            "ON competitor_bid_contents(bidder_id)"
+        )
+    )
+    db.flush()
+
+
+def _extract_bid_description(bid: Dict[str, Any]) -> Optional[str]:
+    """Extract proposal text from varying API payload shapes."""
+    for key in ("description", "bid_description", "proposal", "comment", "cover_letter"):
+        value = bid.get(key)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized:
+                return normalized
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +111,7 @@ async def fetch_and_save_bids(
         )
         return 0
 
+    _ensure_competitor_bid_content_table(db)
     upserted = 0
     for bid in raw_bids:
         bid_id = bid.get("id")
@@ -80,6 +129,8 @@ async def fetch_and_save_bids(
         retracted = bid.get("retracted", False)
         award_status = bid.get("award_status", "pending")
         reputation = bid.get("reputation")
+        description = _extract_bid_description(bid)
+        bidder_id = bid.get("bidder_id", 0)
 
         if existing:
             existing.amount = amount
@@ -92,13 +143,35 @@ async def fetch_and_save_bids(
                 bid_id=bid_id,
                 project_id=project.id,
                 project_freelancer_id=project_freelancer_id,
-                bidder_id=bid.get("bidder_id", 0),
+                bidder_id=bidder_id,
                 amount=amount,
                 period=period,
                 retracted=retracted,
                 award_status=award_status,
                 reputation=reputation,
             ))
+
+        if description:
+            content = (
+                db.query(CompetitorBidContent)
+                .filter(CompetitorBidContent.bid_id == bid_id)
+                .first()
+            )
+            if content:
+                content.bidder_id = bidder_id
+                content.description = description
+                content.fetched_at = datetime.utcnow()
+            else:
+                db.add(
+                    CompetitorBidContent(
+                        bid_id=bid_id,
+                        project_id=project.id,
+                        project_freelancer_id=project_freelancer_id,
+                        bidder_id=bidder_id,
+                        description=description,
+                        fetched_at=datetime.utcnow(),
+                    )
+                )
         upserted += 1
 
     db.commit()
@@ -138,6 +211,46 @@ async def batch_fetch_bids(
         total,
     )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Sync by our bids
+# ---------------------------------------------------------------------------
+
+def get_bidded_project_ids(
+    db: Session,
+    since_days: Optional[int] = None,
+) -> List[int]:
+    """
+    Return distinct project_freelancer_id values that we have bid on.
+    """
+    query = db.query(Bid.project_freelancer_id).distinct()
+    if since_days is not None and since_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=since_days)
+        query = query.filter(Bid.created_at >= cutoff)
+    rows = query.all()
+    return [int(row[0]) for row in rows if row and row[0] is not None]
+
+
+async def sync_bids_for_our_projects(
+    db: Session,
+    since_days: Optional[int] = None,
+    concurrency: int = _DEFAULT_CONCURRENCY,
+) -> Dict[int, int]:
+    """
+    Sync competitor bids for all projects that we have already bid on.
+    """
+    project_ids = get_bidded_project_ids(db, since_days=since_days)
+    if not project_ids:
+        logger.info("No bidded projects found for competitor sync")
+        return {}
+
+    logger.info(
+        "Syncing competitor bids for %d bidded projects (since_days=%s)",
+        len(project_ids),
+        since_days,
+    )
+    return await batch_fetch_bids(db, project_ids, concurrency=concurrency)
 
 
 # ---------------------------------------------------------------------------

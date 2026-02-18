@@ -1,0 +1,7 @@
+Threshold: 7.0
+Total: 0
+Filtered by remote status: 0
+
+ID | Title | Budget | Score | Reason | Competition
+---+-------+--------+-------+--------+------------
+

@@ -1,29 +1,26 @@
-# Scoring Weights
+# Scoring Weights (Optimized for Speed and Win Rate)
 weights:
   budget_efficiency: 0.15
-  competition: 0.25
-  clarity: 0.25
+  competition: 0.30     # Increased: healthy competition is the best predictor
+  clarity: 0.20
   customer: 0.20
   tech: 0.10
   risk: 0.05
 
 # Clarity Scoring Rules
 clarity:
-  deliverable_keywords: ["deliverable", "output", "result", "complete", "milestone", "step"]
-  acceptance_keywords: ["acceptance", "criteria", "requirements", "specs", "specification", "test"]
-  tech_spec_keywords: ["flask", "selenium", "pandas", "fastapi", "sqlalchemy", "react", "vue", "docker", "kubernetes", "airflow", "postgresql", "redis"]
-  vague_keywords: ["optimize", "improve", "insights", "better", "best way", "enhancement", "seamless", "flexible"]
+  deliverable_keywords: ["deliverable", "output", "result", "complete", "milestone", "step", "github", "repo"]
+  acceptance_keywords: ["acceptance", "criteria", "requirements", "specs", "specification", "test", "demo"]
 
 # Customer Scoring Rules
 customer:
-  payment_verified_bonus: 0.0
-  payment_not_verified_penalty: -1.5   # Was -5.0; API often lacks this info
-  low_hire_rate_threshold: 0.30
-  low_hire_rate_penalty: -2.0          # Was -3.0; softer penalty
-  new_customer_penalty: -1.0           # Was -4.0; most API results lack client history
+  payment_verified_bonus: 1.0
+  payment_not_verified_penalty: 0.0   # Removed penalty to increase bid volume
+  low_hire_rate_threshold: 0.40
+  low_hire_rate_penalty: -1.0          # Softened penalty
+  new_customer_penalty: 0.0            # Removed penalty for new clients
   online_bonus: 2.0
   rating_4_5_bonus: 3.0
-  rating_4_0_bonus: 1.5
 
 # Risk Mapping
 risk:

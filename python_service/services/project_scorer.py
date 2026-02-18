@@ -634,35 +634,38 @@ class ProjectScorer:
         """
         Score customer activity/trust (0-10 points).
         """
-        score = 7.0  # Base score for established customers
+        rules = settings.scoring_rules.get("customer", {})
+        score = 7.0  # Base score
         owner_info = project.get("owner_info")
         if not owner_info:
-            return 3.0  # Penalty for no info
+            return 5.0  # Neutral score for missing info
 
-        # 1. Payment Verification (P0)
+        # 1. Payment Verification
         if not owner_info.get("payment_verified"):
-            score -= 5.0
+            score += rules.get("payment_not_verified_penalty", 0.0)
+        else:
+            score += rules.get("payment_verified_bonus", 1.0)
 
         # 2. Hire Rate
         jobs_posted = int(owner_info.get("jobs_posted", 0))
         jobs_hired = int(owner_info.get("jobs_hired", 0))
         hire_rate = jobs_hired / jobs_posted if jobs_posted > 0 else 0
 
-        if jobs_posted > 0 and hire_rate < 0.30:
-            score -= 3.0
+        if jobs_posted > 0 and hire_rate < rules.get("low_hire_rate_threshold", 0.40):
+            score += rules.get("low_hire_rate_penalty", -1.0)
 
         # 3. New Customer
         if jobs_posted == 0:
-            score -= 4.0
+            score += rules.get("new_customer_penalty", 0.0)
 
         # 4. Activity
         if owner_info.get("online_status") == "online":
-            score += 2.0
+            score += rules.get("online_bonus", 2.0)
 
         # 5. Reputation
         rating = float(owner_info.get("rating", 0))
         if rating >= 4.5:
-            score += 3.0
+            score += rules.get("rating_4_5_bonus", 3.0)
         elif rating >= 4.0:
             score += 1.5
 
@@ -701,9 +704,9 @@ class ProjectScorer:
                 score += 1.5
             jobs_posted = owner_info.get("jobs_posted", 0)
             if jobs_posted == 0:
-                score -= 3.0
+                score -= 0.5  # Minimal penalty for new clients
             elif jobs_posted < 5:
-                score -= 1.0
+                score -= 0.2  # Minimal penalty for few jobs
         return max(0.0, min(score, 10.0))
 
     def generate_reason(

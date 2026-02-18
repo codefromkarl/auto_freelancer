@@ -240,7 +240,7 @@ class FreelancerClient:
             "Accept": "application/json, text/plain, */*",
         }
 
-        async with aiohttp.ClientSession(headers=headers, trust_env=False) as session:
+        async with aiohttp.ClientSession(headers=headers, trust_env=True) as session:
             last_error: Optional[str] = None
             for url in urls:
                 try:
@@ -366,11 +366,11 @@ class FreelancerClient:
                             active_only=active_only
                         )
                     ),
-                    timeout=30.0,
+                    timeout=60.0,
                 )
             except asyncio.TimeoutError:
                 raise FreelancerAPIError(
-                    message=f"Search projects timed out after 30s for query='{query}'",
+                    message=f"Search projects timed out after 60s for query='{query}'",
                     status_code=504,
                 )
 
@@ -463,11 +463,11 @@ class FreelancerClient:
                             user_details=user_details
                         )
                     ),
-                    timeout=30.0,
+                    timeout=60.0,
                 )
             except asyncio.TimeoutError:
                 raise FreelancerAPIError(
-                    message=f"Get project {project_id} timed out after 30s",
+                    message=f"Get project {project_id} timed out after 60s",
                     status_code=504,
                 )
 
@@ -524,7 +524,7 @@ class FreelancerClient:
                     logger.debug(f"Failed to fetch from {url}: {e}")
                 return None
 
-            async with aiohttp.ClientSession(headers=headers, trust_env=False) as session:
+            async with aiohttp.ClientSession(headers=headers, trust_env=True) as session:
                 tasks = [fetch_json(session, url) for url in urls]
                 results = await asyncio.gather(*tasks)
 
@@ -610,9 +610,9 @@ class FreelancerClient:
             loop = asyncio.get_running_loop()
 
             def _do_post():
-                # Explicitly create session without proxy
+                # Honor proxy settings from environment when present.
                 sess = _requests.Session()
-                sess.trust_env = False
+                sess.trust_env = True
                 resp = sess.post(
                     bid_url,
                     json=bid_data,
@@ -994,7 +994,7 @@ class FreelancerClient:
             try:
                 def _do_get():
                     sess = _requests.Session()
-                    sess.trust_env = False
+                    sess.trust_env = True
                     return sess.get(url, params=params, headers=headers, timeout=15)
 
                 resp = await loop.run_in_executor(None, _do_get)

@@ -161,6 +161,33 @@ class CompetitorBid(Base):
         }
 
 
+class CompetitorBidContent(Base):
+    """Competitor bid proposal content (cover letters/descriptions)."""
+    __tablename__ = "competitor_bid_contents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    bid_id = Column(Integer, unique=True, nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    project_freelancer_id = Column(Integer, ForeignKey("projects.freelancer_id"), nullable=False, index=True)
+    bidder_id = Column(Integer, nullable=False, index=True)
+    description = Column(Text, nullable=False)
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+
+    project = relationship("Project", foreign_keys=[project_id], overlaps="competitor_bids")
+
+    Index("idx_competitor_bid_content_bid_id", "bid_id")
+    Index("idx_competitor_bid_content_project", "project_freelancer_id")
+
+    def to_dict(self):
+        return {
+            "bid_id": self.bid_id,
+            "project_id": self.project_freelancer_id,
+            "bidder_id": self.bidder_id,
+            "description": self.description,
+            "fetched_at": self.fetched_at.isoformat() if self.fetched_at else None,
+        }
+
+
 class Milestone(Base):
     """Milestones table for payment tracking."""
     __tablename__ = "milestones"

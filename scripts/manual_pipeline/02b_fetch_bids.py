@@ -91,7 +91,7 @@ def main(argv=None) -> int:
             projects = query.all()
 
             # Filter to projects with bid_count > 0
-            eligible = []
+            eligible = set()
             for p in projects:
                 bid_stats = {}
                 if p.bid_stats:
@@ -100,29 +100,34 @@ def main(argv=None) -> int:
                     except (json.JSONDecodeError, TypeError):
                         pass
                 if bid_stats.get("bid_count", 0) > 0:
-                    eligible.append(p.freelancer_id)
+                    eligible.add(p.freelancer_id)
 
-            if not eligible:
+            # Always include projects we already bid on to keep outcome tracking fresh.
+            bidded_ids = competitor_bid_service.get_bidded_project_ids(db, since_days=None)
+            eligible.update(bidded_ids)
+            eligible_list = sorted(eligible)
+
+            if not eligible_list:
                 print("No projects with bids to fetch.")
                 return common.EXIT_SUCCESS
 
             logger.info(
                 "Fetching competitor bids for %d projects (concurrency=%d)",
-                len(eligible),
+                len(eligible_list),
                 args.concurrency,
             )
 
             results = asyncio.run(
                 competitor_bid_service.batch_fetch_bids(
                     db,
-                    eligible,
+                    eligible_list,
                     concurrency=args.concurrency,
                 )
             )
 
             total_bids = sum(results.values())
             print(
-                f"Fetched competitor bids for {len(eligible)} projects, "
+                f"Fetched competitor bids for {len(eligible_list)} projects, "
                 f"total {total_bids} bids stored."
             )
 

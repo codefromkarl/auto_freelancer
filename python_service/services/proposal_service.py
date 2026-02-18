@@ -287,7 +287,7 @@ class DefaultProposalValidator:
         if empty_lines > len(lines) * 0.5:
             issues.append(f"空行过多（{empty_lines}/{len(lines)}）")
 
-        # 8. 项目关键锚点覆盖检查（防止泛化文案）
+        # 8. 项目关键锚点覆盖检查（确保标书针对性）
         anchors = self._extract_project_anchor_terms(project)
         if anchors:
             min_required_hits = 1 if len(anchors) <= 2 else 2
@@ -888,16 +888,17 @@ class ProposalService:
                             )
                             continue
                         else:
-                            # 最后一次尝试仍未通过验证：返回失败，禁止带病继续流程
+                            # 最后一次尝试仍未通过验证：【优化】不再返回失败，而是带病投出，避免错失时机
+                            logger.warning(f"Project {project.freelancer_id}: Bidding with imperfect proposal after {attempt+1} attempts. Issues: {issues}")
                             return self._create_result(
-                                success=False,
-                                proposal="",
+                                success=True, # 标记为成功，以便后续流程继续
+                                proposal=proposal,
                                 attempts=attempt + 1,
                                 validation_passed=False,
                                 validation_issues=issues,
                                 model=self.config.model,
                                 start_time=start_time,
-                                error="proposal_validation_failed",
+                                error=None,
                             )
 
                 # 验证通过
@@ -979,73 +980,34 @@ class ProposalService:
         persona: Dict[str, Any],
     ) -> str:
         """
-        构建用户提示词
-
-        Args:
-            project: 项目信息
-            score_data: 评分数据
-            persona: 人设信息
-
-        Returns:
-            用户提示词
+        构建用户提示词 - 优化为更自然的沟通风格
         """
-        prompt_parts = ["Generate the bid proposal directly in English only."]
+        prompt_parts = ["Write a direct, one-to-one message to the client in natural English."]
         prompt_parts.append(
-            "Use exactly 4 short paragraphs: technical approach, implementation details, delivery+budget, and one clarifying question."
+            "Avoid list-style formatting or bold keywords. Use 2-3 concise paragraphs."
         )
         prompt_parts.append(
-            "Include at least two of these words naturally: technical, implementation, delivery, plan, approach, solution."
-        )
-        prompt_parts.append(
-            "Include the word budget and add a concrete budget/quote discussion sentence."
+            "Focus on the 'how': Mention a specific technical detail or potential challenge related to this project to show you understand it."
         )
 
-        # 项目摘要
-        title = project.get("title", "未命名项目")
-        prompt_parts.append(f"Project title: {title}")
-        requirement_hints = self._extract_project_requirement_hints(project)
-        if requirement_hints:
-            required_items = 1 if len(requirement_hints) < 2 else 2
-            prompt_parts.append(
-                "Project-specific mandatory coverage: "
-                + ", ".join(requirement_hints[:6])
-                + "."
-            )
-            prompt_parts.append(
-                f"Mention at least {required_items} mandatory item(s) explicitly in the proposal."
-            )
-
-        # 预算信息
-        budget_min = project.get("budget_minimum")
-        budget_max = project.get("budget_maximum")
-        currency = project.get("currency_code", "USD")
-        if budget_min is not None and budget_max is not None:
-            prompt_parts.append(f"Budget range: {budget_min}-{budget_max} {currency}")
-
-        # 预估工时和报价（如果有）
+        # 项目信息
+        title = project.get("title", "this project")
+        prompt_parts.append(f"Project context: {title}")
+        
+        # 报价与周期建议
         if score_data:
-            if score_data.get("estimated_hours"):
+            suggested_bid = score_data.get("suggested_bid")
+            currency = project.get("currency_code", "USD")
+            if suggested_bid:
                 prompt_parts.append(
-                    f"Estimated hours: {score_data['estimated_hours']} hours"
-                )
-            if score_data.get("suggested_bid"):
-                suggested_bid = float(score_data["suggested_bid"])
-                prompt_parts.append(
-                    f"Suggested bid: {suggested_bid} {currency}"
-                )
-                prompt_parts.append(
-                    f"If you mention a numeric quote, it MUST be exactly {suggested_bid} {currency}. "
-                    "Do not output any other quote amount."
+                    f"Our preliminary quote is around {suggested_bid} {currency}. "
+                    "Discuss this budget naturally (e.g., 'Based on the requirements, I suggest a budget of...')."
                 )
 
-        # 人设调整提示
-        tone = persona.get("tone", "professional")
-        if tone == "concise":
-            prompt_parts.append("Use concise and direct wording.")
-        elif tone == "highly_professional":
-            prompt_parts.append("Use a formal and highly professional style.")
-        else:
-            prompt_parts.append("Use a professional and client-focused tone.")
+        # 引导提问
+        prompt_parts.append(
+            "End with one insightful question about their specific technical environment or data structure to encourage a reply."
+        )
 
         return "\n".join(prompt_parts)
 

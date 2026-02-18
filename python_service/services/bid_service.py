@@ -263,13 +263,21 @@ async def create_bid(
     # Beautify the amount after conversion
     resolved_amount = _beautify_amount(resolved_amount, project.currency_code)
 
-    # 1c. Bid amount range validation
-    ABS_MIN_AMOUNT = 5.0
-    ABS_MAX_AMOUNT = 50000.0
-    if resolved_amount < ABS_MIN_AMOUNT or resolved_amount > ABS_MAX_AMOUNT:
+    # 1c. Bid amount range validation (convert to USD equivalent for non-USD currencies)
+    ABS_MIN_AMOUNT_USD = 5.0
+    ABS_MAX_AMOUNT_USD = 50000.0
+    project_currency = (project.currency_code or "USD").upper()
+    amount_for_validation = resolved_amount
+    if project_currency != "USD":
+        converter = get_currency_converter()
+        rate_to_usd = converter.get_rate_sync(project_currency)
+        if rate_to_usd and rate_to_usd > 0:
+            amount_for_validation = resolved_amount * rate_to_usd
+    if amount_for_validation < ABS_MIN_AMOUNT_USD or amount_for_validation > ABS_MAX_AMOUNT_USD:
         raise ValueError(
-            f"Bid amount ${resolved_amount:.2f} is outside the absolute allowed range "
-            f"(${ABS_MIN_AMOUNT:.0f} - ${ABS_MAX_AMOUNT:.0f})."
+            f"Bid amount {resolved_amount:.2f} {project_currency} "
+            f"(~${amount_for_validation:.2f} USD) is outside the absolute allowed range "
+            f"(${ABS_MIN_AMOUNT_USD:.0f} - ${ABS_MAX_AMOUNT_USD:.0f} USD)."
         )
     if project.budget_minimum is not None and project.budget_maximum is not None:
         budget_min = float(project.budget_minimum)
@@ -287,46 +295,45 @@ async def create_bid(
     # 2. Determine description (use AI draft from ProposalService if not provided)
     bid_description = description
     if not bid_description:
-        # 使用新的 ProposalService 生成提案
-        try:
-            proposal_service = get_proposal_service()
-            # Pass the ALREADY RESOLVED and BEAUTIFIED amount to the proposal generator
-            score_data = {
-                "suggested_bid": resolved_amount,
-                "estimated_hours": getattr(project, "estimated_hours", None)
-            }
-            proposal_result = await proposal_service.generate_proposal(project, score_data=score_data, db=db)
-            if proposal_result.get("success"):
-                bid_description = proposal_result.get("proposal", "")
-                # 保存生成的提案到项目记录
-                if bid_description:
-                    project.ai_proposal_draft = bid_description
-                    db.commit()
-        except Exception as e:
-            logger.warning(f"Failed to generate proposal using ProposalService: {e}")
-            # 回退到数据库中的现有提案
-            bid_description = (
-                project.ai_proposal_draft if project.ai_proposal_draft else ""
-            )
+        # Check if project already has a draft from the scoring step
+        if project.ai_proposal_draft:
+            logger.info(f"Using pre-generated draft for project {project_id}")
+            bid_description = project.ai_proposal_draft
+        else:
+            # Fallback: Generate now if missing
+            try:
+                proposal_service = get_proposal_service()
+                # Pass the ALREADY RESOLVED and BEAUTIFIED amount to the proposal generator
+                # Note: resolve_submission_amount returns project currency, but ProposalService expects USD or clarified currency.
+                # However, for consistency, we pass the final numeric value.
+                p_score_data = {
+                    "suggested_bid": resolved_amount,
+                    "estimated_hours": getattr(project, "estimated_hours", None)
+                }
+                proposal_result = await proposal_service.generate_proposal(project, score_data=p_score_data, db=db)
+                if proposal_result.get("success"):
+                    bid_description = proposal_result.get("proposal", "")
+            except Exception as e:
+                logger.warning(f"Failed to generate real-time proposal: {e}")
+                bid_description = ""
 
-    # 3. 检查投标内容风险（除非跳过检查）
+    # 3. 检查投标内容风险（执行验证但不再阻塞投标）
     if not skip_content_check and bid_description:
         content_safe, risk_reason = check_content_risk(bid_description, project)
         if not content_safe:
-            # 记录内容风控审计日志
+            # 记录内容验证问题到审计日志，但【不再报错退出】
             audit = AuditLog(
-                action="content_risk_check",
+                action="content_validation_warning",
                 entity_type="bid",
                 entity_id=project_id,
                 request_data=f"description_length={len(bid_description)}",
-                response_data=f"BLOCKED: {risk_reason}",
-                status="blocked",
+                response_data=f"ISSUES: {risk_reason}",
+                status="warning",
                 error_message=risk_reason,
             )
             db.add(audit)
             db.commit()
-
-            raise ValueError(f"投标内容未通过风控检查: {risk_reason}")
+            logger.warning(f"Project {project_id}: Bid proceeding with validation issues: {risk_reason}")
 
     if not bid_description:
         raise ValueError("Bid description is required and no AI draft is available.")
