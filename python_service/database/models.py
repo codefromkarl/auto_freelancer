@@ -39,6 +39,7 @@ class Project(Base):
     suggested_bid = Column(DECIMAL(10, 2))  # AI suggested bid amount in USD
     estimated_hours = Column(Integer)  # AI estimated work hours
     hourly_rate = Column(Float)  # AI calculated hourly rate (USD/h)
+    competitor_bids_fetched_at = Column(DateTime, nullable=True)  # 竞标数据最后拉取时间
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

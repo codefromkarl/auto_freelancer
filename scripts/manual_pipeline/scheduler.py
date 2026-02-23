@@ -102,7 +102,7 @@ def _dedup_candidates(
     return sorted(by_id.values(), key=lambda x: x.get("ai_score", 0), reverse=True)
 
 
-def _human_delay(min_sec: float = 2.0, max_sec: float = 8.0) -> None:
+def _human_delay(min_sec: float = 1.0, max_sec: float = 3.0) -> None:
     """模拟人类操作间隔的随机延迟。"""
     delay = random.uniform(min_sec, max_sec)
     time.sleep(delay)
@@ -164,9 +164,9 @@ async def _step_fetch(
     new_ids: Set[int] = set()
     with common.get_db_context() as db:
         for i, keyword in enumerate(keywords):
-            # 每个 keyword 之间加随机延迟，模拟人类逐个搜索
+            # 关键词之间短延迟（API 自带限流，无需过长等待）
             if i > 0:
-                _human_delay(3.0, 10.0)
+                _human_delay(0.5, 1.5)
             try:
                 results = await project_service.search_projects(
                     db=db,
@@ -195,12 +195,19 @@ async def _step_fetch_competitor_bids(
     fixed_price_only: bool,
     concurrency: int,
     logger: logging.Logger,
+    skip_recently_fetched_minutes: int = 30,
 ) -> int:
-    """Fetch competitor bids for market-active projects and all our bidded projects."""
+    """Fetch competitor bids for market-active projects and all our bidded projects.
+
+    Incremental strategy: skip projects whose competitor bids were fetched
+    within the last ``skip_recently_fetched_minutes`` minutes.
+    """
     from database.models import Project
     from services import competitor_bid_service
 
     cutoff = datetime.utcnow() - timedelta(days=since_days)
+    freshness_cutoff = datetime.utcnow() - timedelta(minutes=skip_recently_fetched_minutes)
+
     with common.get_db_context() as db:
         query = (
             db.query(Project)
@@ -213,6 +220,7 @@ async def _step_fetch_competitor_bids(
 
         eligible = set()
         bid_stats_ids = set()
+        skipped_fresh = 0
         for p in projects:
             bid_stats = {}
             if p.bid_stats:
@@ -221,12 +229,31 @@ async def _step_fetch_competitor_bids(
                 except (json.JSONDecodeError, TypeError):
                     pass
             if bid_stats.get("bid_count", 0) > 0:
+                # 增量策略：跳过最近已拉取的项目
+                if (
+                    p.competitor_bids_fetched_at is not None
+                    and p.competitor_bids_fetched_at >= freshness_cutoff
+                ):
+                    skipped_fresh += 1
+                    continue
                 eligible.add(p.freelancer_id)
                 bid_stats_ids.add(p.freelancer_id)
 
         # Ensure coverage for all projects we have already bid on.
         bidded_ids = competitor_bid_service.get_bidded_project_ids(db, since_days=None)
-        eligible.update(bidded_ids)
+        # 已投标项目也做增量检查
+        for bid_pid in bidded_ids:
+            proj = db.query(Project).filter(Project.freelancer_id == bid_pid).first()
+            if proj and proj.competitor_bids_fetched_at and proj.competitor_bids_fetched_at >= freshness_cutoff:
+                skipped_fresh += 1
+                continue
+            eligible.add(bid_pid)
+
+        if skipped_fresh:
+            logger.info(
+                "Skipped %d projects with fresh competitor data (<%d min old)",
+                skipped_fresh, skip_recently_fetched_minutes,
+            )
 
         if not eligible:
             return 0
@@ -237,11 +264,12 @@ async def _step_fetch_competitor_bids(
         )
         total = sum(results.values())
         logger.info(
-            "Fetched %d competitor bids for %d projects (with_bids=%d, bidded=%d)",
+            "Fetched %d competitor bids for %d projects (with_bids=%d, bidded=%d, skipped_fresh=%d)",
             total,
             len(eligible_list),
             len(bid_stats_ids),
             len(bidded_ids),
+            skipped_fresh,
         )
         return total
 
@@ -343,16 +371,19 @@ def select_bid_candidates(
 
 
 def _determine_bid_amount(candidate: Dict[str, Any]) -> Optional[float]:
-    """Determine bid amount from suggested_bid or budget range."""
+    """Determine bid amount from suggested_bid or budget range.
+
+    Strategy: 新手阶段偏向竞争力定价，取预算范围的 55% 位置。
+    """
     if candidate.get("suggested_bid"):
         return candidate["suggested_bid"]
     budget_max = candidate.get("budget_maximum")
     budget_min = candidate.get("budget_minimum")
     if budget_max and budget_min:
-        # Bid at ~70% of max budget (competitive but not lowest)
-        return round(budget_min + (budget_max - budget_min) * 0.7, 2)
+        # Bid at ~55% of budget range (competitive for newcomers)
+        return round(budget_min + (budget_max - budget_min) * 0.55, 2)
     if budget_max:
-        return round(budget_max * 0.8, 2)
+        return round(budget_max * 0.65, 2)
     if budget_min:
         return round(budget_min * 1.2, 2)
     return None
@@ -381,9 +412,9 @@ async def _step_auto_bid(
     bid_results: List[Dict[str, Any]] = []
 
     for i, candidate in enumerate(candidates):
-        # 每次投标之间加随机延迟，模拟人类逐个审阅后投标
+        # 投标间短延迟（proposal 生成本身已有数秒延迟）
         if i > 0:
-            _human_delay(5.0, 15.0)
+            _human_delay(1.0, 2.0)
 
         pid = candidate["freelancer_id"]
         amount = _determine_bid_amount(candidate)
@@ -636,7 +667,7 @@ async def run_cycle(
     # Step 2: Fetch competitor bids
     logger.info("── Step 2/4: Fetching competitor bids ──")
     comp_bids = await _step_fetch_competitor_bids(
-        since_days, allowed_statuses, fixed_price_only, concurrency=5, logger=logger,
+        since_days, allowed_statuses, fixed_price_only, concurrency=10, logger=logger,
     )
     summary["competitor_bids_fetched"] = comp_bids
 
@@ -736,6 +767,7 @@ async def _morning_batch_bid(
     dry_run: bool,
     confirm_timeout: int,
     logger: logging.Logger,
+    auto_approve: bool = True,
 ) -> Dict[str, Any]:
     """8:00 起床批次：将夜间积累的候选推送 Telegram 确认，等待用户决策后投标。"""
     summary: Dict[str, Any] = {}
@@ -754,7 +786,8 @@ async def _morning_batch_bid(
 
             confirmer = TelegramConfirm(bot_token, chat_id, confirm_timeout)
             msg_id = confirmer.send_candidates(candidates)
-            candidates = confirmer.wait_for_decisions(msg_id, candidates)
+            if not auto_approve:
+                candidates = confirmer.wait_for_decisions(msg_id, candidates)
             logger.info(
                 "Morning batch: %d/%d candidates approved via Telegram",
                 len(candidates), len(candidates),
@@ -797,8 +830,8 @@ def main(argv=None) -> int:
         description="Automated pipeline scheduler: fetch → score → bid.",
     )
     parser.add_argument(
-        "--interval", type=int, default=5,
-        help="Base minutes between cycles (default: 5, actual 5-10 with jitter)",
+        "--interval", type=int, default=3,
+        help="Base minutes between cycles (default: 3, actual 3-6 with jitter)",
     )
     parser.add_argument(
         "--keywords",
@@ -860,6 +893,14 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--no-night-mode", action="store_true",
         help="Disable night mode, run 24h with same behavior",
+    )
+    parser.add_argument(
+        "--night-instant-bid", action="store_true", default=True,
+        help="Bid immediately during night mode instead of accumulating (default: on)",
+    )
+    parser.add_argument(
+        "--no-night-instant-bid", dest="night_instant_bid", action="store_false",
+        help="Accumulate candidates during night and batch-bid at morning (legacy behavior)",
     )
     parser.add_argument(
         "--weekly-report",
@@ -952,8 +993,11 @@ def main(argv=None) -> int:
             and _is_night(current_hour, args.night_start, args.night_end)
         )
 
-        # ── 夜间 → 白天切换：触发 8:00 起床批次 ──
-        if was_night and not night_mode and _night_candidates:
+        # 夜间即时竞标模式：夜间仍然竞标，只是降低频率
+        night_skip_bid = night_mode and not args.night_instant_bid
+
+        # ── 夜间 → 白天切换：触发 8:00 起床批次（仅在积累模式下生效） ──
+        if was_night and not night_mode and _night_candidates and not args.night_instant_bid:
             logger.info(
                 "🌅 Night→Day transition at %02d:00, processing %d accumulated candidates",
                 current_hour, len(_night_candidates),
@@ -993,15 +1037,15 @@ def main(argv=None) -> int:
                 logger=logger,
                 confirm_enabled=args.confirm and not night_mode,
                 confirm_timeout=args.confirm_timeout,
-                skip_bid=night_mode,
+                skip_bid=night_skip_bid,
                 weekly_report_enabled=args.weekly_report,
                 weekly_report_since_days=args.weekly_report_since_days,
                 weekly_report_output=args.weekly_report_output,
                 weekly_report_sync_awards=args.weekly_report_sync_awards,
             ))
 
-            # 夜间模式：积累候选
-            if night_mode:
+            # 夜间模式：仅在积累模式下积累候选
+            if night_skip_bid:
                 new_candidates = summary.get("night_candidates", [])
                 if new_candidates:
                     _night_candidates = _dedup_candidates(_night_candidates, new_candidates)
@@ -1036,9 +1080,9 @@ def main(argv=None) -> int:
 
         # ── 计算下次间隔 ──
         if night_mode:
-            # 夜间：较长间隔 (15-25 min)，模拟睡眠期间低活跃
-            base_seconds = 20 * 60
-            jitter = random.uniform(-0.25, 0.25) * base_seconds
+            # 夜间：较长间隔 (8-12 min)，降低频率但不错过新项目
+            base_seconds = 10 * 60
+            jitter = random.uniform(-0.2, 0.2) * base_seconds
         else:
             # 白天：5-10 min 随机间隔
             base_seconds = args.interval * 60

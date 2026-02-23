@@ -24,7 +24,7 @@ from services.freelancer_client import FreelancerAPIError, get_freelancer_client
 logger = logging.getLogger(__name__)
 
 # Default concurrency for batch operations
-_DEFAULT_CONCURRENCY = 5
+_DEFAULT_CONCURRENCY = 10
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +174,9 @@ async def fetch_and_save_bids(
                 )
         upserted += 1
 
+    # 标记拉取时间，供增量策略使用
+    if project is not None:
+        project.competitor_bids_fetched_at = datetime.utcnow()
     db.commit()
     logger.info(
         "Upserted %d competitor bids for project %s",
@@ -326,12 +329,15 @@ def get_bid_suggestion(
     median = amt.get("median", 0)
     p25 = amt.get("p25", 0)
 
-    # Strategy: bid slightly below median, adjusted by skill match
+    # Strategy: bid below median, adjusted by skill match
     # High skill match -> bid closer to median (confidence premium)
-    # Low skill match -> bid closer to p25 (competitive pricing)
-    discount = 0.05 + (1.0 - our_skills_match) * 0.15  # 5%-20% below median
+    # Low skill match -> bid more aggressively below median
+    # Newcomer-optimized: 10%-25% below median for better ranking
+    discount = 0.10 + (1.0 - our_skills_match) * 0.15  # 10%-25% below median
     suggested_amount = round(median * (1.0 - discount), 2)
-    suggested_amount = max(suggested_amount, p25)  # Never go below p25
+    # Allow going below p25 for newcomers: use min(p25, median*0.75) as floor
+    floor = min(p25, median * 0.75) if median > 0 else p25
+    suggested_amount = max(suggested_amount, floor)
 
     # Period: use median period
     period_stats = analysis.get("period", {})

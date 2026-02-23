@@ -40,7 +40,7 @@ class TestProposalPromptBuilder:
 
     def test_build_prompt(self, builder, sample_project):
         prompt = builder.build_prompt(sample_project, style="narrative", structure="three_step")
-        assert "你是 Freelancer 平台的资深开发者" in prompt
+        assert "senior freelance developer" in prompt
         assert "风格要求：叙事化表达" in prompt
         assert "结构要求：三段式提案" in prompt
 
@@ -52,17 +52,16 @@ class TestProposalPromptBuilder:
 
     def test_build_prompt_enforces_direct_english_generation(self, builder, sample_project):
         prompt = builder.build_prompt(sample_project, style="narrative", structure="three_step")
-        assert "必须全程使用英文（English only）" in prompt
-        assert "禁止先写中文再翻译" in prompt
-        assert "长度控制：目标" in prompt
+        assert "English only" in prompt
+        assert "do not translate from Chinese" in prompt
+        assert "Target" in prompt and "characters" in prompt
 
     def test_build_prompt_includes_reference_samples(self, builder, sample_project):
         prompt = builder.build_prompt(sample_project, style="narrative", structure="three_step")
         assert "高质量投标参考（仅参考风格与结构，禁止照搬原文）" in prompt
-        assert "ZAWN Tech" in prompt
-        assert "Asif A." in prompt
-        assert "风控兼容关键词" in prompt
-        assert "预算表述" in prompt
+        assert "Anti-Template" in prompt
+        assert "Sentence Variety" in prompt
+        assert "Project-Specific Detail" in prompt
 
     def test_get_system_prompt_for_scoring(self, builder):
         prompt = builder.get_system_prompt_for_scoring()

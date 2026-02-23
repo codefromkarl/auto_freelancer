@@ -227,6 +227,9 @@ Requirements:
 - **Critical Keywords**: Naturally incorporate at least two of these words: technical, implementation, delivery, plan, approach, solution.
 - **Budget**: Must include the word "budget" and discuss the quote/timeline realistically.
 - **Closing**: End with a thoughtful, project-specific clarifying question that invites the client to start a conversation.
+- **Anti-Template**: Do NOT use any of these openings: "Hi there", "Hello", "Dear", "I noticed your project", "I am an experienced", "I have extensive experience". Start with a direct technical observation about the project instead.
+- **Sentence Variety**: Vary sentence length and structure. Mix short punchy sentences with longer explanatory ones. Avoid repeating the same sentence pattern.
+- **Project-Specific Detail**: You MUST quote or paraphrase at least one specific requirement from the project description to prove you read it.
 """
 
         return full_prompt

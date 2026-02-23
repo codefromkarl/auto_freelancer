@@ -145,9 +145,9 @@ class ProposalConfig:
     max_retries: int = 3
     timeout: float = 60.0
     min_length: int = 280
-    max_length: int = 1800
-    target_char_min: int = 700
-    target_char_max: int = 1200
+    max_length: int = 2000
+    target_char_min: int = 800
+    target_char_max: int = 1400
     validate_before_return: bool = True
     fallback_enabled: bool = True
     model: str = "gpt-4o-mini"
@@ -980,33 +980,67 @@ class ProposalService:
         persona: Dict[str, Any],
     ) -> str:
         """
-        构建用户提示词 - 优化为更自然的沟通风格
+        构建用户提示词 - 优化为更自然、更有针对性的沟通风格
         """
-        prompt_parts = ["Write a direct, one-to-one message to the client in natural English."]
+        prompt_parts = [
+            "Write a direct, one-to-one message to the client in natural English.",
+            "Avoid list-style formatting or bold keywords. Use 2-3 concise paragraphs.",
+        ]
+
+        # 反模板化指令
         prompt_parts.append(
-            "Avoid list-style formatting or bold keywords. Use 2-3 concise paragraphs."
-        )
-        prompt_parts.append(
-            "Focus on the 'how': Mention a specific technical detail or potential challenge related to this project to show you understand it."
+            "CRITICAL: Do NOT start with generic openings like 'Hi there', 'Hello', "
+            "'I noticed your project', or 'I am an experienced developer'. "
+            "Instead, open with a specific observation or insight about their project's "
+            "technical challenge. Vary your sentence structure throughout."
         )
 
         # 项目信息
         title = project.get("title", "this project")
-        prompt_parts.append(f"Project context: {title}")
-        
+        description = project.get("description") or project.get("preview_description") or ""
+        prompt_parts.append(f"Project title: {title}")
+
+        # 提取项目描述中的关键细节，强制引用
+        if description:
+            desc_snippet = description[:500]
+            prompt_parts.append(
+                f"Project description excerpt: {desc_snippet}\n"
+                "You MUST reference at least one specific detail from the description above "
+                "(a technology, a feature, a data source, or a business requirement) to show "
+                "you've actually read the project."
+            )
+
+        # 技能要求
+        skills = project.get("skills")
+        if skills:
+            if isinstance(skills, str):
+                import json as _json
+                try:
+                    skills = _json.loads(skills)
+                except Exception:
+                    skills = []
+            if isinstance(skills, list) and skills:
+                skills_str = ", ".join(str(s) for s in skills[:6])
+                prompt_parts.append(
+                    f"Required skills: {skills_str}. Mention how your experience with "
+                    "1-2 of these specific technologies applies to this project."
+                )
+
         # 报价与周期建议
         if score_data:
             suggested_bid = score_data.get("suggested_bid")
             currency = project.get("currency_code", "USD")
             if suggested_bid:
                 prompt_parts.append(
-                    f"Our preliminary quote is around {suggested_bid} {currency}. "
-                    "Discuss this budget naturally (e.g., 'Based on the requirements, I suggest a budget of...')."
+                    f"Our quote is around {suggested_bid} {currency}. "
+                    "Discuss this budget naturally (e.g., 'Based on the scope, I'd suggest a budget of...'). "
+                    "Briefly justify the price with a concrete deliverable or milestone."
                 )
 
         # 引导提问
         prompt_parts.append(
-            "End with one insightful question about their specific technical environment or data structure to encourage a reply."
+            "End with one insightful, project-specific question about their technical "
+            "environment, data structure, or integration requirements to encourage a reply."
         )
 
         return "\n".join(prompt_parts)

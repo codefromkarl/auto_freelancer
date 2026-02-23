@@ -39,12 +39,25 @@ def _set_sqlite_wal_mode(dbapi_connection, connection_record):
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def _migrate_add_columns(eng):
+    """Add new columns to existing tables (idempotent)."""
+    from sqlalchemy import text, inspect
+    insp = inspect(eng)
+    if "projects" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("projects")}
+        if "competitor_bids_fetched_at" not in cols:
+            with eng.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE projects ADD COLUMN competitor_bids_fetched_at DATETIME"
+                ))
+
+
 def init_db():
     """Initialize database and create all tables."""
     import os
     # Import models here to register them with Base.metadata
     from . import models
-    
+
     db_path = settings.DATABASE_PATH
     db_dir = os.path.dirname(db_path)
 
@@ -53,6 +66,9 @@ def init_db():
 
     # Create all tables
     Base.metadata.create_all(bind=engine)
+
+    # Lightweight migrations for new columns on existing tables
+    _migrate_add_columns(engine)
 
 
 @contextmanager
