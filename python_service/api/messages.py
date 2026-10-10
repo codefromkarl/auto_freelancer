@@ -482,12 +482,7 @@ async def get_threads(
             query = db.query(MessageThread)
 
             if project_id:
-                # First get internal project ID
-                project = db.query(Project).filter_by(
-                    freelancer_id=project_id
-                ).first()
-                if project:
-                    query = query.filter(MessageThread.project_id == project.id)
+                query = query.filter(MessageThread.project_freelancer_id == project_id)
 
             if unread_only:
                 query = query.filter(MessageThread.unread_count > 0)
@@ -497,10 +492,8 @@ async def get_threads(
 
             # Apply pagination
             threads = query.order_by(MessageThread.last_message_time.desc()).offset(offset).limit(limit).all()
-
-        return APIResponse(
-            status="success",
-            data=[
+            # Serialize while attached: get_db_session commits and expires ORM rows.
+            data = [
                 {
                     "thread_id": t.freelancer_thread_id,
                     "project_id": t.project_freelancer_id,
@@ -510,7 +503,11 @@ async def get_threads(
                     "unread_count": t.unread_count
                 }
                 for t in threads
-            ],
+            ]
+
+        return APIResponse(
+            status="success",
+            data=data,
             total=total
         )
 
@@ -544,11 +541,12 @@ async def get_thread_messages(
             db.query(Message).filter_by(thread_id=thread_id).update({
                 "is_read": True
             })
+            data = [m.to_dict() for m in messages]
 
         return APIResponse(
             status="success",
-            data=[m.to_dict() for m in messages],
-            total=len(messages)
+            data=data,
+            total=len(data)
         )
 
     except Exception as e:

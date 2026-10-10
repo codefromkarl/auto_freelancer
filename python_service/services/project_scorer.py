@@ -471,13 +471,13 @@ class ProjectScorer:
         Returns (score, hourly_rate).
         """
         project_id = project.get("id", "unknown")
-        budget_info = project.get("budget", {})
-        budget_min = float(budget_info.get("minimum", 0) or 0)
-        budget_max = float(budget_info.get("maximum", 0) or 0)
+        budget_info = project.get("budget") or {}
+        budget_min = float(budget_info.get("minimum", project.get("budget_minimum", 0)) or 0)
+        budget_max = float(budget_info.get("maximum", project.get("budget_maximum", 0)) or 0)
 
         currency_code = (
             project.get("currency_code")
-            or project.get("currency", {}).get("code")
+            or (project.get("currency") or {}).get("code")
             or "USD"
         )
 
@@ -581,7 +581,7 @@ class ProjectScorer:
 
     def _score_competition_from_bid_count(self, project: Dict[str, Any]) -> float:
         """Original bid_count-based competition scoring (backward-compatible)."""
-        bid_stats = project.get("bid_stats", {})
+        bid_stats = project.get("bid_stats") or {}
         bid_count = bid_stats.get("bid_count", 0)
 
         if bid_count <= 4:
@@ -618,7 +618,8 @@ class ProjectScorer:
         description = (
             project.get("full_description")
             or project.get("description")
-            or project.get("preview_description", "")
+            or project.get("preview_description")
+            or ""
         ).lower()
         title = project.get("title", "").lower()
         combined_text = f"{title} {description}"
@@ -745,6 +746,16 @@ class ProjectScorer:
             client_risk_score: Optional risk score (0-100, higher is riskier) from client_risk service
             competition_analysis: Optional real competitor bid analysis from competitor_bid_service
         """
+        # ORM rows use flat budget fields and nullable metadata; SDK payloads may
+        # use nested budgets. Normalize the optional fields before all dimensions.
+        project = dict(project)
+        project["full_description"] = (
+            project.get("full_description") or project.get("description")
+            or project.get("preview_description") or ""
+        )
+        for key in ("bid_stats", "owner_info"):
+            if not isinstance(project.get(key), dict):
+                project[key] = {}
         estimated_hours = self.estimate_project_hours(project)
         budget_efficiency_score, hourly_rate = self.score_budget_efficiency(
             project, estimated_hours

@@ -18,7 +18,7 @@ export default function Providers({ children }: { children: React.ReactNode }) {
             networkMode: 'offlineFirst', // Handle offline scenarios gracefully
           },
           mutations: {
-            retry: 1,
+            retry: false,
             networkMode: 'offlineFirst',
           },
         },

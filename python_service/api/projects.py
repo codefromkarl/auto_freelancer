@@ -119,12 +119,21 @@ async def search_projects(
 
 
 @router.get("/{project_id}", response_model=APIResponse)
-async def get_project(project_id: int, db: Session = Depends(get_db)):
+async def get_project(
+    project_id: int,
+    refresh: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
     """
-    Get detailed information for a specific project.
+    Read cached details; explicitly refresh or fetch an uncached project remotely.
     """
     try:
-        project_dict = await project_service.get_project_details(db, project_id)
+        from database.models import Project
+        project = db.query(Project).filter_by(freelancer_id=project_id).first()
+        if project is not None and not refresh:
+            project_dict = project.to_dict()
+        else:
+            project_dict = await project_service.get_project_details(db, project_id)
         return APIResponse(status="success", data=project_dict)
     except FreelancerAPIError as e:
         raise HTTPException(status_code=e.status_code or 500, detail=e.message)
@@ -188,7 +197,7 @@ async def score_project_with_ai(project_id: int, db: Session = Depends(get_db)):
             score_result.ai_proposal_draft,
             suggested_bid=None,
             estimated_hours=score_result.score_breakdown.estimated_hours,
-            hourly_rate=None # 根据需要可以计算
+            hourly_rate=score_result.score_breakdown.hourly_rate,
         )
 
         return APIResponse(status="success", data=updated_data)
