@@ -20,7 +20,9 @@ aiohttp>=3.9.0
 
 # LLM
 openai>=1.0.0
+anthropic>=0.40.0
 
 # Utilities
 python-dateutil==2.8.2
 PyYAML==6.0.1
+dataclasses-json>=0.6.0

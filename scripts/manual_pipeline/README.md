@@ -15,6 +15,7 @@
 默认会执行：
 - `01_check_env.py`
 - `02_fetch.py`
+- `02b_fetch_bids.py`
 - `03_score_concurrent.py`
 - `04_review.py`
 
@@ -46,3 +47,19 @@
 ## 兼容入口
 
 `02_fetch_sync.py` 已转为兼容包装器，行为与 `02_fetch.py` 一致。
+
+## 调度器
+
+```bash
+# 默认预览，仅禁止真实投标；仍会抓取项目、调用评分模型并写本地数据
+python scripts/manual_pipeline/scheduler.py --once
+
+# 显式开启真实投标，要求 Telegram 人工确认
+python scripts/manual_pipeline/scheduler.py --submit --confirm
+```
+
+基础间隔默认 3 分钟，白天实际约 3–6 分钟，夜间约 8–12 分钟。`--confirm` 在夜间同样生效；配置缺失、确认失败或超时均阻断提交。预览数量记录为 `bids_previewed`，不会算入 `bids_submitted`。
+
+`start_scheduler.sh` 按自身目录启动，默认使用项目 `.venv/bin/python`，支持 `PYTHON_BIN` 和额外参数。启动脚本默认也是预览模式。
+
+`05_bid.py --amount` 表示本币金额；未传金额时，美元建议价会明确换算到本币。预览模式不询问是否提交，真实模式仍需输入 `y`，之后服务重新检查远端状态。

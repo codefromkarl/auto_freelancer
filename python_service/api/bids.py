@@ -18,6 +18,7 @@ class CreateBidRequest(BaseModel):
     """Request model for creating a bid."""
     project_id: int = Field(gt=0)
     amount: float = Field(gt=0)
+    amount_currency: Optional[str] = Field(None, pattern=r"^[A-Z]{3}$")
     period: int = Field(default=7, ge=1, le=365)
     description: Optional[str] = Field(None, min_length=10, max_length=5000)
 
@@ -47,7 +48,8 @@ async def create_bid(request: CreateBidRequest, db: Session = Depends(get_db)):
             request.project_id,
             request.amount,
             request.period,
-            request.description
+            request.description,
+            amount_currency=request.amount_currency,
         )
         return APIResponse(status="success", data=bid_data)
         
@@ -109,6 +111,8 @@ async def update_bid(
             
         return APIResponse(status="success", data=updated_bid)
         
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except FreelancerAPIError as e:
         raise HTTPException(status_code=e.status_code or 500, detail=e.message)
 

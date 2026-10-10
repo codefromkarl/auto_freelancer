@@ -80,6 +80,7 @@ class Project(Base):
             "ai_score": self.ai_score,
             "ai_reason": self.ai_reason,
             "ai_proposal_draft": self.ai_proposal_draft,
+            "suggested_bid": float(self.suggested_bid) if self.suggested_bid is not None else None,
             "estimated_hours": self.estimated_hours,
             "hourly_rate": self.hourly_rate,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -123,6 +124,26 @@ class Bid(Base):
             "submitdate": self.submitdate,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class BidSubmission(Base):
+    """Durable reservation: never resend a submission with an uncertain outcome.
+
+    A unique project key serializes submissions across API/CLI processes. Rows
+    remain after success, exceptions or crashes until remote reconciliation.
+    """
+    __tablename__ = "bid_submissions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_freelancer_id = Column(Integer, nullable=False, unique=True)
+    status = Column(String(30), nullable=False, default="submitting")
+    amount = Column(DECIMAL(10, 2), nullable=False)
+    currency_code = Column(String(3), nullable=False)
+    period = Column(Integer, nullable=False)
+    freelancer_bid_id = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class CompetitorBid(Base):

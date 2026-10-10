@@ -6,7 +6,6 @@ import {
   getMessageThreads,
   getMessages,
   sendMessage,
-  markMessageAsRead,
   markThreadAsRead,
   getUnreadCount,
 } from '@/lib/api';
@@ -34,159 +33,6 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Message, MessageThread } from '@/lib/types';
 
-// Mock data
-const mockThreads: MessageThread[] = [
-  {
-    project_id: 101,
-    project_title: 'E-commerce Website Development',
-    unread_count: 3,
-    last_message: {
-      id: 103,
-      project_id: 101,
-      project_title: 'E-commerce Website Development',
-      sender_id: 1001,
-      receiver_id: 1002,
-      sender_name: 'John Smith',
-      content: 'Hi, I would like to discuss the project timeline.',
-      is_read: false,
-      created_at: '2026-01-11T10:30:00Z',
-      ai_suggestions: [
-        'Sure, I can share the timeline with you. When would be a good time for a call?',
-        "I've attached the project timeline for your review.",
-        "Let's schedule a meeting to discuss the details.",
-      ],
-      message_type: 'inquiry',
-    },
-    messages: [
-      {
-        id: 101,
-        project_id: 101,
-        project_title: 'E-commerce Website Development',
-        sender_id: 1001,
-        receiver_id: 1002,
-        sender_name: 'John Smith',
-        content: "Hello! I saw your proposal and I'm interested.",
-        is_read: true,
-        created_at: '2026-01-10T09:00:00Z',
-        message_type: 'inquiry',
-      },
-      {
-        id: 102,
-        project_id: 101,
-        project_title: 'E-commerce Website Development',
-        sender_id: 1002,
-        receiver_id: 1001,
-        sender_name: 'Me',
-        content: "Thank you for your interest! I'd be happy to discuss the project.",
-        is_read: true,
-        created_at: '2026-01-10T09:30:00Z',
-        message_type: 'general',
-      },
-      {
-        id: 103,
-        project_id: 101,
-        project_title: 'E-commerce Website Development',
-        sender_id: 1001,
-        receiver_id: 1002,
-        sender_name: 'John Smith',
-        content: 'Hi, I would like to discuss the project timeline.',
-        is_read: false,
-        created_at: '2026-01-11T10:30:00Z',
-        ai_suggestions: [
-          'Sure, I can share the timeline with you. When would be a good time for a call?',
-          "I've attached the project timeline for your review.",
-          "Let's schedule a meeting to discuss the details.",
-        ],
-        message_type: 'inquiry',
-      },
-    ],
-  },
-  {
-    project_id: 102,
-    project_title: 'Mobile App for Delivery Service',
-    unread_count: 1,
-    last_message: {
-      id: 202,
-      project_id: 102,
-      project_title: 'Mobile App for Delivery Service',
-      sender_id: 1003,
-      receiver_id: 1002,
-      sender_name: 'Sarah Johnson',
-      content: 'Great! When can you start?',
-      is_read: false,
-      created_at: '2026-01-11T08:15:00Z',
-      ai_suggestions: [
-        'I can start immediately! Let me know your preferred start date.',
-        'I need about a week for preparation. Does that work for you?',
-      ],
-      message_type: 'interview',
-    },
-    messages: [
-      {
-        id: 201,
-        project_id: 102,
-        project_title: 'Mobile App for Delivery Service',
-        sender_id: 1003,
-        receiver_id: 1002,
-        sender_name: 'Sarah Johnson',
-        content: "Your proposal looks great! I'd like to move forward.",
-        is_read: true,
-        created_at: '2026-01-10T14:00:00Z',
-        message_type: 'interview',
-      },
-      {
-        id: 202,
-        project_id: 102,
-        project_title: 'Mobile App for Delivery Service',
-        sender_id: 1003,
-        receiver_id: 1002,
-        sender_name: 'Sarah Johnson',
-        content: 'Great! When can you start?',
-        is_read: false,
-        created_at: '2026-01-11T08:15:00Z',
-        ai_suggestions: [
-          'I can start immediately! Let me know your preferred start date.',
-          'I need about a week for preparation. Does that work for you?',
-        ],
-        message_type: 'interview',
-      },
-    ],
-  },
-  {
-    project_id: 103,
-    project_title: 'Data Analysis Dashboard',
-    unread_count: 0,
-    last_message: {
-      id: 301,
-      project_id: 103,
-      project_title: 'Data Analysis Dashboard',
-      sender_id: 1004,
-      receiver_id: 1002,
-      sender_name: 'Mike Brown',
-      content: "Thank you for your bid, but we've decided to go with another developer.",
-      is_read: true,
-      created_at: '2026-01-09T16:00:00Z',
-      message_type: 'offer',
-    },
-    messages: [
-      {
-        id: 301,
-        project_id: 103,
-        project_title: 'Data Analysis Dashboard',
-        sender_id: 1004,
-        receiver_id: 1002,
-        sender_name: 'Mike Brown',
-        content: "Thank you for your bid, but we've decided to go with another developer.",
-        is_read: true,
-        created_at: '2026-01-09T16:00:00Z',
-        message_type: 'offer',
-      },
-    ],
-  },
-];
-
-const mockUnreadCount = 4;
-
 export default function MessagesPage() {
   const [selectedThread, setSelectedThread] = useState<MessageThread | null>(null);
   const [newMessage, setNewMessage] = useState('');
@@ -195,46 +41,49 @@ export default function MessagesPage() {
 
   const queryClient = useQueryClient();
 
-  const { data: threads = mockThreads, isLoading } = useQuery({
+  const {
+    data: threads = [],
+    isLoading,
+    error: threadsError,
+  } = useQuery({
     queryKey: ['messageThreads'],
     queryFn: getMessageThreads,
-    placeholderData: mockThreads,
   });
 
-  const { data: unreadCount = mockUnreadCount } = useQuery({
+  const { data: unreadCount = 0 } = useQuery({
     queryKey: ['unreadCount'],
     queryFn: getUnreadCount,
-    placeholderData: mockUnreadCount,
   });
 
   const sendMessageMutation = useMutation({
     mutationFn: ({
-      projectId,
+      threadId,
       content,
       messageType,
     }: {
-      projectId: number;
+      threadId: number;
       content: string;
       messageType: string;
-    }) => sendMessage(projectId, content, messageType),
+    }) => sendMessage(threadId, content, messageType),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['messageThreads'] });
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
       setNewMessage('');
     },
   });
 
-  const markReadMutation = useMutation({
-    mutationFn: (messageId: number) => markMessageAsRead(messageId),
+  const markThreadReadMutation = useMutation({
+    mutationFn: (threadId: number) => markThreadAsRead(threadId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['messageThreads', 'unreadCount'] });
+      queryClient.invalidateQueries({ queryKey: ['messageThreads'] });
+      queryClient.invalidateQueries({ queryKey: ['unreadCount'] });
     },
   });
 
-  const markThreadReadMutation = useMutation({
-    mutationFn: (projectId: number) => markThreadAsRead(projectId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['messageThreads', 'unreadCount'] });
-    },
+  const { data: selectedMessages = [], error: messagesError } = useQuery({
+    queryKey: ['messages', selectedThread?.thread_id],
+    queryFn: () => getMessages(selectedThread!.thread_id),
+    enabled: !!selectedThread,
   });
 
   const filteredThreads = threads.filter((thread) => {
@@ -287,7 +136,7 @@ export default function MessagesPage() {
   const handleSelectThread = (thread: MessageThread) => {
     setSelectedThread(thread);
     if (thread.unread_count > 0) {
-      markThreadReadMutation.mutate(thread.project_id);
+      markThreadReadMutation.mutate(thread.thread_id);
     }
   };
 
@@ -295,7 +144,7 @@ export default function MessagesPage() {
     if (!newMessage.trim() || !selectedThread) return;
 
     sendMessageMutation.mutate({
-      projectId: selectedThread.project_id,
+      threadId: selectedThread.thread_id,
       content: newMessage,
       messageType: 'general',
     });
@@ -320,6 +169,11 @@ export default function MessagesPage() {
         )}
       </div>
 
+      {(threadsError || messagesError || sendMessageMutation.error) && (
+        <p role="alert" className="text-red-600">
+          {String(threadsError || messagesError || sendMessageMutation.error)}
+        </p>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-300px)]">
         {/* Thread List */}
         <Card className="lg:col-span-1 flex flex-col">
@@ -353,10 +207,10 @@ export default function MessagesPage() {
               ) : (
                 filteredThreads.map((thread) => (
                   <div
-                    key={thread.project_id}
+                    key={thread.thread_id}
                     onClick={() => handleSelectThread(thread)}
                     className={`p-3 rounded-lg cursor-pointer transition-colors ${
-                      selectedThread?.project_id === thread.project_id
+                      selectedThread?.thread_id === thread.thread_id
                         ? 'bg-blue-50 border-blue-200 border'
                         : 'hover:bg-gray-50'
                     }`}
@@ -372,14 +226,14 @@ export default function MessagesPage() {
                           )}
                         </div>
                         <p className="text-sm text-muted-foreground truncate mt-1">
-                          {thread.last_message.content}
+                          {thread.last_message?.content || ''}
                         </p>
                         <div className="flex items-center gap-2 mt-2">
                           <span className="text-xs text-muted-foreground">
-                            {thread.last_message.sender_name}
+                            {thread.last_message?.sender_name || ''}
                           </span>
                           <span className="text-xs text-muted-foreground">
-                            {formatTime(thread.last_message.created_at)}
+                            {formatTime(thread.last_message?.created_at || '')}
                           </span>
                         </div>
                       </div>
@@ -401,7 +255,7 @@ export default function MessagesPage() {
                   <div>
                     <CardTitle className="text-lg">{selectedThread.project_title}</CardTitle>
                     <CardDescription>
-                      {getMessageTypeBadge(selectedThread.last_message.message_type)}
+                      {getMessageTypeBadge(selectedMessages.at(-1)?.message_type || '')}
                     </CardDescription>
                   </div>
                   <div className="flex gap-2">
@@ -417,13 +271,12 @@ export default function MessagesPage() {
 
               <ScrollArea className="flex-1 p-4">
                 <div className="space-y-4">
-                  {selectedThread.messages.map((message) => (
+                  {selectedMessages.map((message) => (
                     <div
                       key={message.id}
                       className={`flex gap-3 ${message.sender_name === 'Me' ? 'flex-row-reverse' : ''}`}
                     >
                       <Avatar className="h-8 w-8">
-                        <AvatarImage src={message.sender_avatar} />
                         <AvatarFallback>
                           {message.sender_name
                             .split(' ')
@@ -455,28 +308,27 @@ export default function MessagesPage() {
               </ScrollArea>
 
               {/* AI Suggestions */}
-              {selectedThread.messages[selectedThread.messages.length - 1]?.ai_suggestions &&
-                selectedThread.messages[selectedThread.messages.length - 1]?.sender_name !==
-                  'Me' && (
+              {selectedMessages[selectedMessages.length - 1]?.ai_suggestions &&
+                selectedMessages[selectedMessages.length - 1]?.sender_name !== 'Me' && (
                   <div className="border-t p-4 bg-gray-50">
                     <div className="flex items-center gap-2 mb-2">
                       <Sparkles className="h-4 w-4 text-purple-500" />
                       <span className="text-sm font-medium">AI 建议回复</span>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      {selectedThread.messages[
-                        selectedThread.messages.length - 1
-                      ]?.ai_suggestions?.map((suggestion, index) => (
-                        <Button
-                          key={index}
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleUseAiSuggestion(suggestion)}
-                          className="text-xs"
-                        >
-                          {suggestion.substring(0, 50)}...
-                        </Button>
-                      ))}
+                      {selectedMessages[selectedMessages.length - 1]?.ai_suggestions?.map(
+                        (suggestion, index) => (
+                          <Button
+                            key={index}
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleUseAiSuggestion(suggestion)}
+                            className="text-xs"
+                          >
+                            {suggestion.substring(0, 50)}...
+                          </Button>
+                        )
+                      )}
                     </div>
                   </div>
                 )}

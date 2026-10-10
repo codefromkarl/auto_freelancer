@@ -334,6 +334,10 @@ def main(argv=None) -> int:
                 )
                 return common.EXIT_VALIDATION_ERROR
 
+            if project.status == "bid_submitted":
+                print(f"Project {project_id} already marked as bid_submitted; reconcile before retrying.")
+                return common.EXIT_VALIDATION_ERROR
+
             # 实时校验远端项目状态，避免对已冻结/关闭项目继续预览或投标
             try:
                 is_biddable_now, reason = asyncio.run(
@@ -359,14 +363,12 @@ def main(argv=None) -> int:
                 )
                 return common.EXIT_VALIDATION_ERROR
 
-            if project.status == "bid_submitted":
-                print(f"Project {project_id} already marked as bid_submitted.")
-                return common.EXIT_SUCCESS
-
             amount = args.amount
+            input_currency = project.currency_code or "USD"
             if amount is None:
                 if project.suggested_bid is not None:
                     amount = float(project.suggested_bid)
+                    input_currency = "USD"
                 elif project.budget_maximum:
                     amount = float(project.budget_maximum)
                 elif project.budget_minimum:
@@ -391,7 +393,7 @@ def main(argv=None) -> int:
             )
             try:
                 submission_amount = float(
-                    bid_service._resolve_submission_amount(project, input_amount)
+                    bid_service._resolve_submission_amount(project, input_amount, input_currency)
                 )
             except ValueError as exc:
                 print(f"Failed to resolve submission amount: {exc}")
@@ -484,7 +486,7 @@ def main(argv=None) -> int:
                     project_currency,
                 )
 
-                content_safe, risk_reason = bid_service.check_content_risk(proposal, project)
+                content_safe, risk_reason = bid_service.check_content_risk(proposal, project, submission_amount)
                 if not content_safe:
                     print(f"Generated proposal blocked by content risk check: {risk_reason}")
                     return common.EXIT_VALIDATION_ERROR
@@ -524,13 +526,13 @@ def main(argv=None) -> int:
                     logger.warning("Failed to archive preview: %s", exc)
                     print(f"Warning: failed to archive preview: {exc}")
 
+            if args.dry_run:
+                print("[Dry Run] Bid not submitted.")
+                return common.EXIT_SUCCESS
+
             confirm = input("Submit bid? [y/N]: ").strip().lower()
             if confirm != "y":
                 print("Cancelled.")
-                return common.EXIT_SUCCESS
-
-            if args.dry_run:
-                print("[Dry Run] Bid not submitted.")
                 return common.EXIT_SUCCESS
 
             if proposal_source == "fallback_draft":
@@ -548,7 +550,7 @@ def main(argv=None) -> int:
                         amount=submission_amount,
                         period=args.period,
                         description=proposal,
-                        validate_remote_status=False,
+                        amount_currency=project_currency,
                     )
                 )
                 project.status = "bid_submitted"

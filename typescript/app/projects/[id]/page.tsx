@@ -64,8 +64,7 @@ export default function ProjectDetailPage() {
       createBid(projectId, {
         amount: data.amount,
         period: data.period,
-        description: project?.ai_proposal_draft || 'Generated proposal',
-        bidder_id: 12345,
+        amount_currency: project?.currency_code,
       }),
     onSuccess: () => {
       setIsBidding(false);
@@ -219,7 +218,7 @@ export default function ProjectDetailPage() {
                 <Button
                   className="w-full justify-start bg-blue-600 hover:bg-blue-700 text-white"
                   onClick={() => {
-                    setBidAmount(project.suggested_bid || project.budget_minimum || 0);
+                    setBidAmount(project.budget_minimum || 0);
                     setIsBidding(true);
                   }}
                 >

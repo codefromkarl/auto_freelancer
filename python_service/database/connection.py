@@ -7,6 +7,7 @@ from sqlalchemy.pool import NullPool
 from contextlib import contextmanager
 from fastapi import Request, HTTPException, status
 import os
+import secrets
 
 
 # Base class for SQLAlchemy models
@@ -95,14 +96,7 @@ def get_db():
 
 
 async def verify_api_key(request: Request):
-    """Verify API key from request header.
-
-    Supports BYPASS_AUTH=true environment variable for local testing only.
-    """
-    # Allow bypassing auth in test/dev environments via explicit env var
-    if os.environ.get("BYPASS_AUTH", "").lower() == "true":
-        return "bypass-auth"
-
+    """Verify API key from request header; tests use dependency overrides."""
     api_key = request.headers.get("X-API-Key")
 
     if not api_key:
@@ -111,7 +105,9 @@ async def verify_api_key(request: Request):
             detail="Missing API key"
         )
 
-    if api_key != settings.PYTHON_API_KEY:
+    if not settings.PYTHON_API_KEY or not secrets.compare_digest(
+        api_key.encode(), settings.PYTHON_API_KEY.encode()
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key"

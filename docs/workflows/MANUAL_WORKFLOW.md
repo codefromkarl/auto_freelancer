@@ -29,16 +29,19 @@ python scripts/manual_pipeline/run_until_bid.py --since-days 1 --threshold 7.0
 
 ## 模式二：定时调度 (Scheduler)
 
-适合长期后台运行。调度器会进入死循环，每隔指定时间（默认 30 分钟）执行一次完整的流程。
+适合长期后台运行。默认基础间隔 3 分钟，白天实际约 3–6 分钟，夜间约 8–12 分钟。默认执行抓取、评分和投标预览；真实投标必须显式传入 `--submit`。
 
 **功能特点：**
 - 自动维护一个 `pipeline.lock` 文件，防止重复运行。
 - 集成了 Telegram 通知，发现高分项目直接推送到手机。
 - 自动跳过已处理的项目。
+- 开启 `--confirm` 后，Telegram 配置缺失、确认失败或超时均禁止投标，夜间同样生效。
 
 **命令：**
 ```bash
 python scripts/manual_pipeline/scheduler.py
+# 配置完成并决定开启真实投标时，显式选择并要求人工确认
+python scripts/manual_pipeline/scheduler.py --submit --confirm
 ```
 
 **配置建议：**
@@ -79,12 +82,18 @@ python scripts/manual_pipeline/05_bid.py --project-id 12345678 --amount 50 --per
 虽然核心逻辑是 Python 脚本，但你可以启动 Next.js 前端来查看数据。
 
 1. 确保 SQLite 数据库文件存在 (`python_service/data/freelancer.db`)。
-2. 启动前端：
+2. 从根目录启动后端（加载根目录 `.env`）：
+   ```bash
+   .venv/bin/uvicorn main:app --app-dir python_service --host 127.0.0.1 --port 8000
+   ```
+3. 启动前端：
    ```bash
    cd typescript
    npm run dev
    ```
-3. 访问 `http://localhost:3000/projects` 查看已抓取和评分的项目。
+4. 在 `/settings` 保存后端地址与 `PYTHON_API_KEY`，再访问 `/projects`。所有业务接口都要求 API Key。
+
+默认数据库、日志和评分 YAML 路径按源码位置确定，不依赖启动目录。Compose 使用根目录 `.env` 传入 LLM 等配置，数据库和日志仍使用容器内路径。默认只发布到本机 `127.0.0.1:8000`；代理不再硬编码，需要时在环境中显式配置。
 
 ---
 

@@ -80,7 +80,7 @@ export default function RiskPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">客户风险管理</h1>
-        <p className="text-gray-500">监控和评估客户风险等级</p>
+        <p className="text-gray-500">演示数据：真实客户风控查询请使用后端风险接口</p>
       </div>
 
       {/* Filters */}

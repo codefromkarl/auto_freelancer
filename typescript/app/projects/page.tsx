@@ -138,7 +138,7 @@ export default function ProjectsPage() {
     retry: 1,
     refetchOnWindowFocus: false,
     // 如果正在同步，每5秒轮询一次状态
-    refetchInterval: (data: any) => (data?.is_syncing ? 5000 : false),
+    refetchInterval: (query) => (query.state.data?.is_syncing ? 5000 : false),
   });
 
   const projects = responseData?.data || [];
@@ -220,7 +220,7 @@ export default function ProjectsPage() {
     try {
       await searchProjects({ ...filters, refresh: true });
       refetch();
-      alert('同步成功！');
+      alert('已请求同步，请查看项目列表更新结果。');
     } catch (err) {
       alert('同步失败: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
@@ -243,14 +243,16 @@ export default function ProjectsPage() {
           <p className="text-muted-foreground mt-1">管理和筛选抓取到的 Freelancer 项目</p>
         </div>
         <div className="flex gap-2">
-          <Button 
-            variant="default" 
-            size="sm" 
-            onClick={handleSync} 
+          <Button
+            variant="default"
+            size="sm"
+            onClick={handleSync}
             disabled={isSyncing || isBackendSyncing}
             className="bg-blue-600 hover:bg-blue-700 text-white min-w-[100px]"
           >
-            <CloudDownload className={`mr-2 h-4 w-4 ${isSyncing || isBackendSyncing ? 'animate-spin' : ''}`} />
+            <CloudDownload
+              className={`mr-2 h-4 w-4 ${isSyncing || isBackendSyncing ? 'animate-spin' : ''}`}
+            />
             {isSyncing || isBackendSyncing ? '同步中...' : '同步项目'}
           </Button>
           <Button variant="outline" size="sm" onClick={handleRefresh} disabled={isFetching}>
@@ -331,9 +333,9 @@ export default function ProjectsPage() {
                 <label className="text-sm font-medium flex items-center gap-1">
                   <Globe className="h-4 w-4" /> 国家
                 </label>
-                <Select value={country} onValueChange={setCountry}>
+                <Select value={country} onValueChange={setCountry} disabled>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择国家" />
+                    <SelectValue placeholder="国家筛选尚未接入" />
                   </SelectTrigger>
                   <SelectContent>
                     {COUNTRIES.map((c) => (
@@ -350,6 +352,7 @@ export default function ProjectsPage() {
                   <Tags className="h-4 w-4" /> 技能
                 </label>
                 <Select
+                  disabled
                   value={selectedSkills[0] || ''}
                   onValueChange={(v) => {
                     if (v && !selectedSkills.includes(v)) {
@@ -358,7 +361,7 @@ export default function ProjectsPage() {
                   }}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="添加技能" />
+                    <SelectValue placeholder="技能筛选尚未接入" />
                   </SelectTrigger>
                   <SelectContent>
                     {AVAILABLE_SKILLS.filter((s) => !selectedSkills.includes(s)).map((s) => (
@@ -430,6 +433,8 @@ export default function ProjectsPage() {
               <Button
                 size="sm"
                 variant="outline"
+                disabled
+                title="尚未接入"
                 onClick={() => {
                   selectedProjects.forEach((id) => flagMutation.mutate({ id, flag: true }));
                 }}
@@ -440,6 +445,8 @@ export default function ProjectsPage() {
               <Button
                 size="sm"
                 variant="outline"
+                disabled
+                title="尚未接入"
                 onClick={() => {
                   selectedProjects.forEach((id) => archiveMutation.mutate({ id, archive: true }));
                 }}
@@ -455,6 +462,9 @@ export default function ProjectsPage() {
         </Card>
       )}
 
+      {(batchScoreMutation.error || scoreMutation.error) && (
+        <ApiErrorDisplay message={String(batchScoreMutation.error || scoreMutation.error)} />
+      )}
       {/* Projects Table */}
       <div className="rounded-md border bg-white overflow-hidden shadow-sm">
         <Table>
@@ -522,9 +532,6 @@ export default function ProjectsPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
-                      {project.is_flagged && (
-                        <Flag className="h-4 w-4 text-yellow-500 fill-yellow-500" />
-                      )}
                       <div>
                         <div
                           className="font-medium text-foreground line-clamp-1"
@@ -547,18 +554,27 @@ export default function ProjectsPage() {
                     <div className="flex flex-wrap gap-1">
                       {(() => {
                         try {
-                          const skills = typeof project.skills === 'string' 
-                            ? JSON.parse(project.skills) 
-                            : (Array.isArray(project.skills) ? project.skills : []);
-                          
+                          const skills =
+                            typeof project.skills === 'string'
+                              ? JSON.parse(project.skills)
+                              : Array.isArray(project.skills)
+                                ? project.skills
+                                : [];
+
                           // If skills are just IDs (numbers), we might not be able to show names without a mapping.
                           // Assuming for now they might be names or we handle it.
                           // If they are numbers, we'll just show IDs or nothing.
-                          return Array.isArray(skills) ? skills.slice(0, 3).map((s: any, i: number) => (
-                            <Badge key={i} variant="outline" className="text-[10px] px-1 py-0 h-4">
-                              {s}
-                            </Badge>
-                          )) : null;
+                          return Array.isArray(skills)
+                            ? skills.slice(0, 3).map((s: any, i: number) => (
+                                <Badge
+                                  key={i}
+                                  variant="outline"
+                                  className="text-[10px] px-1 py-0 h-4"
+                                >
+                                  {s}
+                                </Badge>
+                              ))
+                            : null;
                         } catch (e) {
                           return null;
                         }
@@ -574,9 +590,9 @@ export default function ProjectsPage() {
                         <span className="text-gray-300 text-[10px]">/10</span>
                       </div>
                     ) : (
-                      <Button 
-                        size="sm" 
-                        variant="ghost" 
+                      <Button
+                        size="sm"
+                        variant="ghost"
                         className="h-7 text-xs text-blue-500 hover:text-blue-600 p-0"
                         onClick={() => scoreMutation.mutate(project.id)}
                         disabled={scoreMutation.isPending && scoreMutation.variables === project.id}
@@ -591,10 +607,10 @@ export default function ProjectsPage() {
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-xs">
-                     <div className="flex items-center gap-1">
-                        <Globe className="h-3 w-3" />
-                        {project.country || '-'}
-                     </div>
+                    <div className="flex items-center gap-1">
+                      <Globe className="h-3 w-3" />
+                      {project.country || '-'}
+                    </div>
                   </TableCell>
                   <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
                     {new Date(project.submitdate || '').toLocaleDateString()}
@@ -606,14 +622,16 @@ export default function ProjectsPage() {
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
-                      <Button 
-                        variant="ghost" 
+                      <Button
+                        variant="ghost"
                         size="icon"
                         onClick={() => scoreMutation.mutate(project.id)}
                         disabled={scoreMutation.isPending && scoreMutation.variables === project.id}
                         title="AI 分析"
                       >
-                        <Brain className={`h-4 w-4 text-blue-500 ${scoreMutation.isPending && scoreMutation.variables === project.id ? 'animate-spin' : ''}`} />
+                        <Brain
+                          className={`h-4 w-4 text-blue-500 ${scoreMutation.isPending && scoreMutation.variables === project.id ? 'animate-spin' : ''}`}
+                        />
                       </Button>
                       <Button variant="ghost" size="icon" asChild>
                         <Link href={`/projects/${project.id}`} title="查看详情">
@@ -645,6 +663,8 @@ export default function ProjectsPage() {
                     key={format}
                     variant={exportFormat === format ? 'default' : 'outline'}
                     size="sm"
+                    disabled={format === 'xlsx'}
+                    title={format === 'xlsx' ? '尚未接入' : undefined}
                     onClick={() => setExportFormat(format)}
                   >
                     {format.toUpperCase()}

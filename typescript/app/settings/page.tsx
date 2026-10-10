@@ -15,13 +15,19 @@ export default function SettingsPage() {
   const [serviceInfo, setServiceInfo] = useState<any>(null);
 
   useEffect(() => {
-    // Load from local storage
-    const storedKey = localStorage.getItem('api_key');
-    const storedUrl = localStorage.getItem('api_url');
-    if (storedKey) setApiKey(storedKey);
-    if (storedUrl) setApiUrl(storedUrl);
-
-    checkConnection();
+    let active = true;
+    async function loadSettings() {
+      const data = await checkHealth();
+      if (!active) return;
+      setApiKey(localStorage.getItem('api_key') || '');
+      setApiUrl(localStorage.getItem('api_url') || 'http://localhost:8000/api/v1');
+      setServiceInfo(data);
+      setStatus(data?.status === 'healthy' ? 'connected' : 'disconnected');
+    }
+    void loadSettings();
+    return () => {
+      active = false;
+    };
   }, []);
 
   const checkConnection = async () => {
@@ -92,7 +98,7 @@ export default function SettingsPage() {
                 <span className="font-medium">数据库</span>
               </div>
               <Badge variant={status === 'connected' ? 'outline' : 'outline'} className="bg-white">
-                {status === 'connected' ? '正常' : '未知'}
+                未检测
               </Badge>
             </div>
 

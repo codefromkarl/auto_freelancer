@@ -18,12 +18,16 @@ fi
 # 2. 清理全局代理环境变量，防止干扰主爬虫进程（主进程通常应走直连或自理代理）
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
-cd /home/yuanzhi/Develop/automation/freelancer_automation/scripts/manual_pipeline
+set -e
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+PYTHON_BIN="${PYTHON_BIN:-../../.venv/bin/python}"
+if [ ! -x "$PYTHON_BIN" ]; then PYTHON_BIN=python3; fi
 
-exec python scheduler.py \
+exec "$PYTHON_BIN" scheduler.py \
   --interval 5 \
   --since-days 3 \
   --bid-threshold 6.0 \
   --max-bids-per-cycle 2 \
   --limit 20 \
-  --keywords "python automation,fastapi,web scraping,api integration"
+  --keywords "python automation,fastapi,web scraping,api integration" "$@"

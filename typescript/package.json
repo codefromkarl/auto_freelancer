@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test": "node --experimental-strip-types --test lib/api.spec.ts",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "prepare": "husky"

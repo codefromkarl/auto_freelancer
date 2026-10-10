@@ -20,7 +20,10 @@ export function ProjectCard({ project }: ProjectCardProps) {
               {project.title}
             </Link>
           </CardTitle>
-          <Badge variant={project.status === 'active' ? 'default' : 'secondary'} className="shrink-0">
+          <Badge
+            variant={project.status === 'active' ? 'default' : 'secondary'}
+            className="shrink-0"
+          >
             {project.status === 'active' ? '开放' : project.status}
           </Badge>
         </div>
@@ -33,7 +36,7 @@ export function ProjectCard({ project }: ProjectCardProps) {
               {project.currency_code} {project.budget_minimum} - {project.budget_maximum}
             </span>
           </div>
-          {project.ai_score !== undefined && (
+          {project.ai_score != null && (
             <div className="flex items-center gap-1">
               <Star
                 className={cn(

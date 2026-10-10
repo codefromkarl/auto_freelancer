@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
+import { Component, ErrorInfo, ReactNode } from 'react';
 import { RefreshCw, WifiOff, ServerCrash, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -49,20 +49,10 @@ export class ErrorBoundary extends Component<Props, State> {
 
 // Error display component
 function ErrorDisplay({ error, onRetry }: { error: Error | null; onRetry: () => void }) {
-  const [errorMessage, setErrorMessage] = useState<string>('加载失败，请稍后重试');
-  const [isNetworkError, setIsNetworkError] = useState(false);
-
-  useEffect(() => {
-    if (error) {
-      // Check if it's a network error
-      if (error.message?.includes('network') || error.message?.includes('fetch')) {
-        setIsNetworkError(true);
-        setErrorMessage('无法连接到服务器，请检查网络连接或后端服务是否运行');
-      } else if (error.message) {
-        setErrorMessage(error.message);
-      }
-    }
-  }, [error]);
+  const isNetworkError = !!error?.message?.match(/network|fetch/i);
+  const errorMessage = isNetworkError
+    ? '无法连接到服务器，请检查网络连接或后端服务是否运行'
+    : error?.message || '加载失败，请稍后重试';
 
   return (
     <div className="flex flex-col items-center justify-center h-64 w-full text-gray-500 animate-in fade-in duration-300">

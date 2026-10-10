@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Save, Play, RotateCcw, Copy, Plus, Trash2, Loader2 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -30,10 +30,9 @@ const TAB_TO_CATEGORY: Record<string, string> = {
 export default function PromptsPage() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState('scoring');
-  const [selectedId, setSelectedId] = useState<string>(''); // string to work with Select value
-  const [content, setContent] = useState('');
+  const [selectedKey, setSelectedId] = useState<string>(''); // string to work with Select value
+  const [draft, setDraft] = useState<{ id: string; content: string; name: string } | null>(null);
   const [testOutput, setTestOutput] = useState('');
-  const [localName, setLocalName] = useState('');
 
   // Fetch prompts
   const { data: prompts = [], isLoading } = useQuery({
@@ -41,33 +40,20 @@ export default function PromptsPage() {
     queryFn: () => getPromptTemplates(TAB_TO_CATEGORY[activeTab]),
   });
 
-  // Effect to select first prompt on load or when tab changes
-  useEffect(() => {
-    if (prompts.length > 0) {
-      // If nothing selected, or selected ID not in current list
-      const currentSelected = prompts.find((p) => p.id.toString() === selectedId);
-      if (!selectedId || !currentSelected) {
-        const first = prompts[0];
-        setSelectedId(first.id.toString());
-        setContent(first.content);
-        setLocalName(first.name);
-      }
-    } else {
-      // No prompts in this category
-      setSelectedId('');
-      setContent('');
-      setLocalName('');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prompts]);
+  const currentPrompt = prompts.find((p) => p.id.toString() === selectedKey) || prompts[0];
+  const selectedId = currentPrompt?.id.toString() || '';
+  const content = draft?.id === selectedId ? draft.content : currentPrompt?.content || '';
+  const localName = draft?.id === selectedId ? draft.name : currentPrompt?.name || '';
+  const setContent = (value: string) =>
+    setDraft({ id: selectedId, name: localName, content: value });
+  const setLocalName = (value: string) => setDraft({ id: selectedId, name: value, content });
 
   // Handle selection change
   const handleSelect = (idStr: string) => {
     const prompt = prompts.find((p) => p.id.toString() === idStr);
     if (prompt) {
       setSelectedId(idStr);
-      setContent(prompt.content);
-      setLocalName(prompt.name);
+      setDraft(null);
       setTestOutput('');
     }
   };
@@ -104,8 +90,7 @@ export default function PromptsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['prompts'] });
       setSelectedId('');
-      setContent('');
-      setLocalName('');
+      setDraft(null);
     },
   });
 
@@ -138,6 +123,7 @@ export default function PromptsPage() {
 
   const handleReset = () => {
     if (selectedId) {
+      setDraft(null);
       handleSelect(selectedId);
     }
   };

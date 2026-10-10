@@ -1,5 +1,8 @@
 # BidMaster API 接口完整文档
 
+> 2026-10-10 提交契约更新：所有业务路由均验证 `X-API-Key`，不支持 `BYPASS_AUTH`。`POST /api/v1/bids` 与 `POST /api/v1/proposals` 的 `amount` 默认表示项目本币；传入美元建议价时必须设置 `amount_currency: "USD"`。缺少有效远端 ID、提交超时或本地落库失败返回错误（409），持久预留记录阻断重试，需核对远端结果。不得将此错误解释为“未提交”。详细状态见 [架构说明](ARCHITECTURE.md#提交契约)。
+
+
 > Freelancer AI 自动化系统 - 接口文档
 >
 > **参考**: [Freelancer API Documentation](https://developers.freelancer.com/docs)

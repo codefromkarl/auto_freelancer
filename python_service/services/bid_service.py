@@ -3,10 +3,13 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 import re
 import logging
+import math
+from sqlalchemy.exc import IntegrityError
+from config import settings
 
 logger = logging.getLogger(__name__)
 
-from database.models import Bid, Project, AuditLog
+from database.models import Bid, BidSubmission, Project, AuditLog
 from services.freelancer_client import get_freelancer_client, FreelancerAPIError
 from services.proposal_service import get_proposal_service, ProposalService
 from utils.currency_converter import get_currency_converter
@@ -21,7 +24,7 @@ def _coerce_int(value: Any) -> Optional[int]:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        return int(value)
+        return int(value) if math.isfinite(value) and value.is_integer() else None
     if isinstance(value, str):
         raw = value.strip()
         if raw.isdigit():
@@ -84,27 +87,22 @@ def _extract_bid_ids(
     return bid_id, bidder_id
 
 
-def _is_same_amount(value_a: float, value_b: float, epsilon: float = 0.01) -> bool:
-    return abs(float(value_a) - float(value_b)) <= epsilon
-
-
-def _resolve_submission_amount(project: Project, amount: float) -> float:
-    """Resolve outgoing bid amount in project's native currency.
-
-    `project.suggested_bid` is stored in USD. When callers pass that value directly
-    for non-USD projects, convert it back to project currency before submission.
-    """
+def _resolve_submission_amount(
+    project: Project, amount: float, amount_currency: Optional[str] = None,
+) -> float:
+    """Amounts default to native currency; USD suggestions must be explicit."""
     project_currency = (project.currency_code or "USD").upper()
-    if project_currency == "USD":
-        return float(amount)
-
-    suggested_bid_usd = float(project.suggested_bid) if project.suggested_bid is not None else None
-    if suggested_bid_usd is None or not _is_same_amount(float(amount), suggested_bid_usd):
-        return float(amount)
+    source_currency = (amount_currency or project_currency).upper()
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("Bid amount must be finite and positive.")
+    if source_currency == project_currency:
+        return round(float(amount), 2)
+    if source_currency != "USD":
+        raise ValueError("Bid amount currency must be USD or the project's currency.")
 
     converter = get_currency_converter()
     rate_to_usd = converter.get_rate_sync(project_currency)
-    if rate_to_usd is None or rate_to_usd <= 0:
+    if rate_to_usd is None or not math.isfinite(rate_to_usd) or rate_to_usd <= 0:
         raise ValueError(
             f"Cannot convert USD suggested bid to {project_currency}: missing exchange rate."
         )
@@ -121,7 +119,9 @@ def _resolve_submission_amount(project: Project, amount: float) -> float:
     return converted
 
 
-def check_content_risk(description: str, project: Project) -> Tuple[bool, str]:
+def check_content_risk(
+    description: str, project: Project, expected_amount: Optional[float] = None,
+) -> Tuple[bool, str]:
     """
     检查投标内容的风险
 
@@ -132,7 +132,10 @@ def check_content_risk(description: str, project: Project) -> Tuple[bool, str]:
     """
     from services.proposal_service import DefaultProposalValidator
 
-    validator = DefaultProposalValidator(min_length=100, max_length=3000)
+    validator = DefaultProposalValidator(
+        min_length=settings.PROPOSAL_MIN_LENGTH,
+        max_length=settings.PROPOSAL_MAX_LENGTH,
+    )
     project_dict = project.to_dict() if hasattr(project, "to_dict") else {
         "title": project.title,
         "description": project.description,
@@ -141,6 +144,8 @@ def check_content_risk(description: str, project: Project) -> Tuple[bool, str]:
         "budget_maximum": float(project.budget_maximum) if project.budget_maximum else None,
         "currency_code": project.currency_code,
     }
+    if expected_amount is not None:
+        project_dict["expected_bid_amount"] = expected_amount
     is_valid, issues = validator.validate(description, project_dict)
     if is_valid:
         return True, "通过"
@@ -198,37 +203,13 @@ async def validate_project_biddable_now(
     return True, "ok"
 
 
-def _beautify_amount(amount: float, currency: str) -> float:
-    """Make the bid amount look more 'human' by rounding to natural increments."""
-    val = float(amount)
-    currency = (currency or "USD").upper()
-    
-    # Large currencies like INR, JPY, IDR
-    if val > 1000:
-        # Round to nearest 50 or 100
-        if val > 5000:
-            return float(round(val / 100) * 100)
-        return float(round(val / 50) * 50)
-    
-    # Medium currencies like USD, EUR, GBP
-    if val > 100:
-        return float(round(val / 10) * 10)
-    
-    # Small amounts
-    if val > 20:
-        return float(round(val / 5) * 5)
-    
-    return float(round(val))
-
-
 async def create_bid(
     db: Session,
     project_id: int,
     amount: float,
     period: int,
     description: Optional[str] = None,
-    skip_content_check: bool = False,
-    validate_remote_status: bool = True,
+    amount_currency: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Submit a bid to Freelancer and record it.
@@ -239,6 +220,18 @@ async def create_bid(
         raise ValueError(
             "Project not found in database. Please sync with Freelancer API first."
         )
+    if not isinstance(period, int) or isinstance(period, bool) or not 1 <= period <= 365:
+        raise ValueError("Bid period must be between 1 and 365 days.")
+    submission = db.query(BidSubmission).filter_by(project_freelancer_id=project_id).first()
+    if submission:
+        raise ValueError(
+            f"Submission already reserved for project {project_id} ({submission.status}); "
+            "reconcile the remote outcome before retrying."
+        )
+    if project.status == "bid_submitted" or db.query(AuditLog).filter_by(
+        action="create_bid", entity_id=project_id, status="success_without_local_bid_id",
+    ).first():
+        raise ValueError("Previous submission requires remote reconciliation before retrying.")
 
     # 1b. Idempotency: reject duplicate bids for the same project
     existing_bid = db.query(Bid).filter_by(
@@ -252,16 +245,7 @@ async def create_bid(
             f"already exists for project {project_id}."
         )
 
-    if validate_remote_status:
-        is_biddable_now, reason = await validate_project_biddable_now(db, project)
-        if not is_biddable_now:
-            raise ValueError(
-                f"Project is not biddable now. {reason}"
-            )
-
-    resolved_amount = _resolve_submission_amount(project, amount)
-    # Beautify the amount after conversion
-    resolved_amount = _beautify_amount(resolved_amount, project.currency_code)
+    resolved_amount = _resolve_submission_amount(project, amount, amount_currency)
 
     # 1c. Bid amount range validation (convert to USD equivalent for non-USD currencies)
     ABS_MIN_AMOUNT_USD = 5.0
@@ -271,8 +255,9 @@ async def create_bid(
     if project_currency != "USD":
         converter = get_currency_converter()
         rate_to_usd = converter.get_rate_sync(project_currency)
-        if rate_to_usd and rate_to_usd > 0:
-            amount_for_validation = resolved_amount * rate_to_usd
+        if rate_to_usd is None or not math.isfinite(rate_to_usd) or rate_to_usd <= 0:
+            raise ValueError(f"Cannot validate amount: missing exchange rate for {project_currency}.")
+        amount_for_validation = resolved_amount * rate_to_usd
     if amount_for_validation < ABS_MIN_AMOUNT_USD or amount_for_validation > ABS_MAX_AMOUNT_USD:
         raise ValueError(
             f"Bid amount {resolved_amount:.2f} {project_currency} "
@@ -292,51 +277,40 @@ async def create_bid(
                     f"${budget_min:.0f} - ${budget_max:.0f}."
                 )
 
-    # 2. Determine description (use AI draft from ProposalService if not provided)
+    # 2. Generate a validated final proposal, rather than submitting an untyped cache draft.
     bid_description = description
     if not bid_description:
-        # Check if project already has a draft from the scoring step
-        if project.ai_proposal_draft:
-            logger.info(f"Using pre-generated draft for project {project_id}")
-            bid_description = project.ai_proposal_draft
-        else:
-            # Fallback: Generate now if missing
-            try:
-                proposal_service = get_proposal_service()
-                # Pass the ALREADY RESOLVED and BEAUTIFIED amount to the proposal generator
-                # Note: resolve_submission_amount returns project currency, but ProposalService expects USD or clarified currency.
-                # However, for consistency, we pass the final numeric value.
-                p_score_data = {
-                    "suggested_bid": resolved_amount,
-                    "estimated_hours": getattr(project, "estimated_hours", None)
-                }
-                proposal_result = await proposal_service.generate_proposal(project, score_data=p_score_data, db=db)
-                if proposal_result.get("success"):
-                    bid_description = proposal_result.get("proposal", "")
-            except Exception as e:
-                logger.warning(f"Failed to generate real-time proposal: {e}")
-                bid_description = ""
-
-    # 3. 检查投标内容风险（执行验证但不再阻塞投标）
-    if not skip_content_check and bid_description:
-        content_safe, risk_reason = check_content_risk(bid_description, project)
-        if not content_safe:
-            # 记录内容验证问题到审计日志，但【不再报错退出】
-            audit = AuditLog(
-                action="content_validation_warning",
-                entity_type="bid",
-                entity_id=project_id,
-                request_data=f"description_length={len(bid_description)}",
-                response_data=f"ISSUES: {risk_reason}",
-                status="warning",
-                error_message=risk_reason,
-            )
-            db.add(audit)
-            db.commit()
-            logger.warning(f"Project {project_id}: Bid proceeding with validation issues: {risk_reason}")
-
+        proposal_result = await get_proposal_service().generate_proposal(
+            project,
+            score_data={"suggested_bid": resolved_amount, "estimated_hours": project.estimated_hours},
+            db=db,
+        )
+        if not proposal_result.get("success") or proposal_result.get("validation_passed") is not True:
+            raise ValueError("Final proposal generation/validation failed; submission blocked.")
+        bid_description = proposal_result.get("proposal", "")
     if not bid_description:
         raise ValueError("Bid description is required and no AI draft is available.")
+    content_safe, risk_reason = check_content_risk(bid_description, project, resolved_amount)
+    if not content_safe:
+        raise ValueError(f"Bid content validation failed: {risk_reason}")
+
+    # Refresh after generation/approval, immediately before the submission reservation.
+    is_biddable_now, reason = await validate_project_biddable_now(db, project)
+    if not is_biddable_now:
+        raise ValueError(f"Project is not biddable now. {reason}")
+
+    # Commit the reservation BEFORE the external side effect. The unique key handles
+    # multiple API workers and CLI processes; crashes leave a durable blocked row.
+    submission = BidSubmission(
+        project_freelancer_id=project_id, status="submitting", amount=resolved_amount,
+        currency_code=project_currency, period=period,
+    )
+    db.add(submission)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError("Concurrent/duplicate submission rejected; reconcile before retrying.") from exc
 
     # 4. Call External API
     client = get_freelancer_client()
@@ -347,54 +321,22 @@ async def create_bid(
             period=period,
             description=bid_description,
         )
-    except FreelancerAPIError as e:
-        # Log failure
-        audit = AuditLog(
-            action="create_bid",
-            entity_type="bid",
-            entity_id=project_id,  # Using project ID as proxy entity ID for failed bid
-            request_data=f"amount={resolved_amount}, period={period}",
-            response_data=e.message,
-            status="error",
-            error_message=e.message,
-        )
-        db.add(audit)
-        db.commit()
-        raise e
+    except Exception as exc:
+        _mark_submission_unknown(db, project_id, str(exc))
+        raise FreelancerAPIError(
+            "Submission outcome unknown; remote reconciliation required before retrying.",
+            status_code=409,
+        ) from exc
 
     fallback_bidder_id = _coerce_int(getattr(client, "user_id", None))
     bid_id, bidder_id = _extract_bid_ids(result or {}, fallback_bidder_id=fallback_bidder_id)
 
     # 5. Save to DB on success
-    if bid_id is None:
-        logger.warning(
-            "Bid submitted remotely but bid_id missing in response; skip bid row insert. "
-            "project_id=%s response=%s",
-            project_id,
-            result,
-        )
-        audit = AuditLog(
-            action="create_bid",
-            entity_type="bid",
-            entity_id=project_id,
-            request_data=f"amount={resolved_amount}, period={period}",
-            response_data=str(result),
-            status="success_without_local_bid_id",
-        )
-        db.add(audit)
-        db.commit()
-        return {
-            "bid_id": None,
-            "project_id": project_id,
-            "amount": resolved_amount,
-            "period": period,
-            "description": bid_description,
-            "status": "submitted_remote_only",
-        }
-
-    if bidder_id is None:
-        raise ValueError(
-            "Bid submitted but bidder_id missing in API response and no fallback user_id available."
+    if bid_id is None or bidder_id is None:
+        _mark_submission_unknown(db, project_id, "Remote response missing bid/bidder ID")
+        raise FreelancerAPIError(
+            "Submission response incomplete; remote reconciliation required before retrying.",
+            status_code=409,
         )
 
     bid = Bid(
@@ -420,8 +362,17 @@ async def create_bid(
         status="success",
     )
     db.add(audit)
-    db.commit()
-    db.refresh(bid)
+    submission.status = "submitted"
+    submission.freelancer_bid_id = bid_id
+    project.status = "bid_submitted"
+    try:
+        db.commit()
+    except Exception as exc:
+        _mark_submission_unknown(db, project_id, f"Local persistence failed: {exc}")
+        raise FreelancerAPIError(
+            "Remote submission may have succeeded; local persistence failed. Reconcile before retrying.",
+            status_code=409,
+        ) from exc
 
     return {
         "bid_id": bid.freelancer_bid_id,
@@ -431,6 +382,19 @@ async def create_bid(
         "description": bid_description,
         "status": "submitted",
     }
+
+
+def _mark_submission_unknown(db: Session, project_id: int, reason: str) -> None:
+    """Best effort detail update; the already committed reservation always blocks."""
+    db.rollback()
+    try:
+        submission = db.query(BidSubmission).filter_by(project_freelancer_id=project_id).one()
+        submission.status = "outcome_unknown"
+        submission.error_message = reason
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Unable to record uncertain outcome for project %s; reservation retained", project_id)
 
 
 def get_user_bids(
@@ -464,6 +428,16 @@ async def update_bid(
     bid = db.query(Bid).filter_by(freelancer_bid_id=bid_id).first()
     if not bid:
         return None
+
+    project = db.query(Project).filter_by(freelancer_id=bid.project_freelancer_id).first()
+    if not project:
+        raise ValueError("Cannot update bid without its local project.")
+    if description is not None:
+        content_safe, reason = check_content_risk(
+            description, project, float(amount if amount is not None else bid.amount),
+        )
+        if not content_safe:
+            raise ValueError(f"Bid content validation failed: {reason}")
 
     # Call API
     try:

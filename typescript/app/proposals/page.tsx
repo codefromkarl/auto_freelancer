@@ -57,103 +57,6 @@ import { Progress } from '@/components/ui/progress';
 import { ApiErrorDisplay } from '@/components/ui/ErrorBoundary';
 import { Proposal, CompetitorAnalysis, ProposalTemplate } from '@/lib/types';
 
-// Fallback data when API is unavailable
-const FALLBACK_PROPOSALS: Proposal[] = [
-  {
-    id: 1,
-    project_id: 101,
-    project_title: 'E-commerce Website Development',
-    project_budget: '$500 - $1000',
-    amount: 750,
-    period: 14,
-    description: 'Full stack e-commerce solution with payment integration',
-    status: 'pending',
-    submitdate: '2026-01-10',
-    ai_score: 8.5,
-    competitor_count: 12,
-    win_probability: 0.35,
-  },
-  {
-    id: 2,
-    project_id: 102,
-    project_title: 'Mobile App for Delivery Service',
-    project_budget: '$1000 - $2000',
-    amount: 1500,
-    period: 30,
-    description: 'React Native delivery app with GPS tracking',
-    status: 'accepted',
-    submitdate: '2026-01-08',
-    ai_score: 9.2,
-    competitor_count: 8,
-    win_probability: 0.65,
-  },
-  {
-    id: 3,
-    project_id: 103,
-    project_title: 'Data Analysis Dashboard',
-    project_budget: '$300 - $500',
-    amount: 400,
-    period: 7,
-    description: 'Python data visualization dashboard',
-    status: 'rejected',
-    submitdate: '2026-01-05',
-    ai_score: 5.8,
-    competitor_count: 25,
-    win_probability: 0.15,
-  },
-];
-
-const FALLBACK_TEMPLATES: ProposalTemplate[] = [
-  {
-    id: 1,
-    name: 'Web Development Template',
-    category: 'proposal',
-    content: 'I am an experienced full-stack developer with 5+ years of experience in React, Node.js, and modern web technologies.',
-    variables: ['React', 'Node.js', 'Python'],
-    is_active: true,
-    created_at: '2026-01-01',
-  },
-  {
-    id: 2,
-    name: 'Mobile App Template',
-    category: 'proposal',
-    content: 'I specialize in mobile application development with React Native and Flutter.',
-    variables: ['React Native', 'Flutter'],
-    is_active: false,
-    created_at: '2026-01-05',
-  },
-];
-
-const FALLBACK_STATS = {
-  total: 45,
-  accepted: 12,
-  rejected: 18,
-  pending: 15,
-  success_rate: 40,
-  avg_amount: 850,
-};
-
-const FALLBACK_COMPETITORS: CompetitorAnalysis[] = [
-  {
-    bidder_id: 1,
-    bidder_name: 'TopDev_Pro',
-    amount: 800,
-    period: 14,
-    rating: 4.9,
-    bid_count: 156,
-    success_rate: 78,
-  },
-  {
-    bidder_id: 2,
-    bidder_name: 'WebMaster_Expert',
-    amount: 700,
-    period: 10,
-    rating: 4.7,
-    bid_count: 89,
-    success_rate: 65,
-  },
-];
-
 export default function ProposalsPage() {
   const [activeTab, setActiveTab] = useState('list');
   const [showTemplateDialog, setShowTemplateDialog] = useState(false);
@@ -168,7 +71,7 @@ export default function ProposalsPage() {
 
   // Fetch proposals with error handling
   const {
-    data: proposals = FALLBACK_PROPOSALS,
+    data: proposals = [],
     isLoading: proposalsLoading,
     isError: proposalsError,
     error: proposalsErrorObj,
@@ -176,14 +79,20 @@ export default function ProposalsPage() {
   } = useQuery({
     queryKey: ['proposals'],
     queryFn: () => getProposals(),
-    placeholderData: FALLBACK_PROPOSALS,
     retry: 2,
     refetchOnMount: true,
   });
 
   // Fetch proposal stats
   const {
-    data: stats = FALLBACK_STATS,
+    data: stats = {
+      total: 0,
+      accepted: 0,
+      rejected: 0,
+      pending: 0,
+      success_rate: 0,
+      avg_amount: 0,
+    },
     isLoading: statsLoading,
     isError: statsError,
     error: statsErrorObj,
@@ -191,14 +100,13 @@ export default function ProposalsPage() {
   } = useQuery({
     queryKey: ['proposalStats'],
     queryFn: () => getProposalStats(),
-    placeholderData: FALLBACK_STATS,
     retry: 2,
     refetchOnMount: true,
   });
 
   // Fetch proposal templates
   const {
-    data: templates = FALLBACK_TEMPLATES,
+    data: templates = [],
     isLoading: templatesLoading,
     isError: templatesError,
     error: templatesErrorObj,
@@ -206,14 +114,13 @@ export default function ProposalsPage() {
   } = useQuery({
     queryKey: ['proposalTemplates'],
     queryFn: () => getProposalTemplates(),
-    placeholderData: FALLBACK_TEMPLATES,
     retry: 2,
     refetchOnMount: true,
   });
 
   // Fetch competitors for specific project
   const {
-    data: competitors = FALLBACK_COMPETITORS,
+    data: competitors = [],
     isLoading: competitorsLoading,
     isError: competitorsError,
     refetch: refetchCompetitors,
@@ -221,17 +128,21 @@ export default function ProposalsPage() {
     queryKey: ['competitors', competitorProjectId || selectedProposal?.project_id],
     queryFn: () => {
       const projectId = competitorProjectId || selectedProposal?.project_id;
-      if (!projectId) return FALLBACK_COMPETITORS;
+      if (!projectId) return [];
       return getCompetitorAnalysis(Number(projectId));
     },
     enabled: !!(competitorProjectId || selectedProposal?.project_id),
-    placeholderData: FALLBACK_COMPETITORS,
     retry: 2,
   });
 
   // Create template mutation
   const createTemplateMutation = useMutation({
-    mutationFn: async (data: { name: string; content: string; skills: string[]; is_active: boolean }) => {
+    mutationFn: async (data: {
+      name: string;
+      content: string;
+      skills: string[];
+      is_active: boolean;
+    }) => {
       return createProposalTemplate({
         name: data.name,
         content: data.content,
@@ -313,7 +224,10 @@ export default function ProposalsPage() {
     const templateData = {
       name: newTemplate.name,
       content: newTemplate.content,
-      skills: newTemplate.skills.split(',').map((s) => s.trim()).filter(Boolean),
+      skills: newTemplate.skills
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
       is_active: false,
     };
 
@@ -395,72 +309,72 @@ export default function ProposalsPage() {
           isLoading={statsLoading}
         />
       ) : (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">总投标数</CardTitle>
-            <FileText className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {statsLoading ? (
-              <Loader2 className="h-6 w-6 animate-spin" />
-            ) : (
-              <>
-                <div className="text-2xl font-bold">{stats?.total || 0}</div>
-                <p className="text-xs text-muted-foreground">累计投标</p>
-              </>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">成功率</CardTitle>
-            <TrendingUp className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {statsLoading ? (
-              <Loader2 className="h-6 w-6 animate-spin" />
-            ) : (
-              <>
-                <div className="text-2xl font-bold">{stats?.success_rate || 0}%</div>
-                <Progress value={stats?.success_rate || 0} className="mt-2" />
-              </>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">已中标</CardTitle>
-            <CheckCircle className="h-4 w-4 text-green-500" />
-          </CardHeader>
-          <CardContent>
-            {statsLoading ? (
-              <Loader2 className="h-6 w-6 animate-spin" />
-            ) : (
-              <>
-                <div className="text-2xl font-bold text-green-600">{stats?.accepted || 0}</div>
-                <p className="text-xs text-muted-foreground">中标项目</p>
-              </>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">平均金额</CardTitle>
-            <Sparkles className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {statsLoading ? (
-              <Loader2 className="h-6 w-6 animate-spin" />
-            ) : (
-              <>
-                <div className="text-2xl font-bold">${stats?.avg_amount || 0}</div>
-                <p className="text-xs text-muted-foreground">平均中标金额</p>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">总投标数</CardTitle>
+              <FileText className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              {statsLoading ? (
+                <Loader2 className="h-6 w-6 animate-spin" />
+              ) : (
+                <>
+                  <div className="text-2xl font-bold">{stats?.total || 0}</div>
+                  <p className="text-xs text-muted-foreground">累计投标</p>
+                </>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">成功率</CardTitle>
+              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              {statsLoading ? (
+                <Loader2 className="h-6 w-6 animate-spin" />
+              ) : (
+                <>
+                  <div className="text-2xl font-bold">{stats?.success_rate || 0}%</div>
+                  <Progress value={stats?.success_rate || 0} className="mt-2" />
+                </>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">已中标</CardTitle>
+              <CheckCircle className="h-4 w-4 text-green-500" />
+            </CardHeader>
+            <CardContent>
+              {statsLoading ? (
+                <Loader2 className="h-6 w-6 animate-spin" />
+              ) : (
+                <>
+                  <div className="text-2xl font-bold text-green-600">{stats?.accepted || 0}</div>
+                  <p className="text-xs text-muted-foreground">中标项目</p>
+                </>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">平均金额</CardTitle>
+              <Sparkles className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              {statsLoading ? (
+                <Loader2 className="h-6 w-6 animate-spin" />
+              ) : (
+                <>
+                  <div className="text-2xl font-bold">${stats?.avg_amount || 0}</div>
+                  <p className="text-xs text-muted-foreground">平均中标金额</p>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {/* Main Content */}
@@ -593,27 +507,27 @@ export default function ProposalsPage() {
                         <div>
                           <CardTitle className="text-lg">{template.name}</CardTitle>
                           <CardDescription>
-                            创建于 {new Date(template.created_at).toLocaleDateString()}
+                            创建于 {new Date(template.created_at || '').toLocaleDateString()}
                           </CardDescription>
                         </div>
-                            <div className="flex gap-2">
-                              {template.is_active && <Badge variant="secondary">默认</Badge>}
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleEditTemplate(template)}
-                              >
-                                <Edit className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => deleteTemplateMutation.mutate(template.id)}
-                                disabled={template.is_active}
-                              >
-                                <Trash2 className="h-4 w-4 text-red-500" />
-                              </Button>
-                            </div>
+                        <div className="flex gap-2">
+                          {template.is_active && <Badge variant="secondary">默认</Badge>}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleEditTemplate(template)}
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => deleteTemplateMutation.mutate(template.id)}
+                            disabled={template.is_active}
+                          >
+                            <Trash2 className="h-4 w-4 text-red-500" />
+                          </Button>
+                        </div>
                       </div>
                     </CardHeader>
                     <CardContent>
@@ -688,53 +602,53 @@ export default function ProposalsPage() {
                   </div>
                 ) : (
                   <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/50">
-                      <TableHead>竞标者</TableHead>
-                      <TableHead>评分</TableHead>
-                      <TableHead>投标金额</TableHead>
-                      <TableHead>周期</TableHead>
-                      <TableHead>投标数</TableHead>
-                      <TableHead>成功率</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {competitorsLoading ? (
-                      <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8">
-                          <Loader2 className="h-4 w-4 animate-spin inline-block" /> 加载中...
-                        </TableCell>
+                    <TableHeader>
+                      <TableRow className="bg-muted/50">
+                        <TableHead>竞标者</TableHead>
+                        <TableHead>评分</TableHead>
+                        <TableHead>投标金额</TableHead>
+                        <TableHead>周期</TableHead>
+                        <TableHead>投标数</TableHead>
+                        <TableHead>成功率</TableHead>
                       </TableRow>
-                    ) : competitors.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                          暂无数据，请选择项目进行分析
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      competitors.map((competitor) => (
-                        <TableRow key={competitor.bidder_id}>
-                          <TableCell className="font-medium">{competitor.bidder_name}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <span className="text-yellow-500">★</span>
-                              {competitor.rating}
-                            </div>
-                          </TableCell>
-                          <TableCell className="font-mono">${competitor.amount}</TableCell>
-                          <TableCell>{competitor.period}天</TableCell>
-                          <TableCell>{competitor.bid_count}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-2">
-                              <Progress value={competitor.success_rate} className="h-2 w-16" />
-                              <span className="text-xs">{competitor.success_rate}%</span>
-                            </div>
+                    </TableHeader>
+                    <TableBody>
+                      {competitorsLoading ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-8">
+                            <Loader2 className="h-4 w-4 animate-spin inline-block" /> 加载中...
                           </TableCell>
                         </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
+                      ) : competitors.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                            暂无数据，请选择项目进行分析
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        competitors.map((competitor) => (
+                          <TableRow key={competitor.bidder_id}>
+                            <TableCell className="font-medium">{competitor.bidder_name}</TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1">
+                                <span className="text-yellow-500">★</span>
+                                {competitor.rating}
+                              </div>
+                            </TableCell>
+                            <TableCell className="font-mono">${competitor.amount}</TableCell>
+                            <TableCell>{competitor.period}天</TableCell>
+                            <TableCell>{competitor.bid_count}</TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-2">
+                                <Progress value={competitor.success_rate} className="h-2 w-16" />
+                                <span className="text-xs">{competitor.success_rate}%</span>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
                 )}
               </div>
             </CardContent>
@@ -796,12 +710,15 @@ export default function ProposalsPage() {
       </Dialog>
 
       {/* Create/Edit Template Dialog */}
-      <Dialog open={showTemplateDialog} onOpenChange={(open) => {
-        if (!open) {
-          handleCloseTemplateDialog();
-        }
-        setShowTemplateDialog(open);
-      }}>
+      <Dialog
+        open={showTemplateDialog}
+        onOpenChange={(open) => {
+          if (!open) {
+            handleCloseTemplateDialog();
+          }
+          setShowTemplateDialog(open);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{editingTemplate ? '编辑模板' : '创建提案模板'}</DialogTitle>
@@ -845,7 +762,12 @@ export default function ProposalsPage() {
             </Button>
             <Button
               onClick={handleSaveTemplate}
-              disabled={!newTemplate.name || !newTemplate.content || createTemplateMutation.isPending || updateTemplateMutation.isPending}
+              disabled={
+                !newTemplate.name ||
+                !newTemplate.content ||
+                createTemplateMutation.isPending ||
+                updateTemplateMutation.isPending
+              }
             >
               {(createTemplateMutation.isPending || updateTemplateMutation.isPending) && (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />

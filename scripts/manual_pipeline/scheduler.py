@@ -324,7 +324,7 @@ def select_bid_candidates(
 
     Returns list of Project ORM objects (detached-safe for read).
     """
-    from database.models import Project, Bid
+    from database.models import Project, Bid, BidSubmission
 
     cutoff = datetime.utcnow() - timedelta(days=since_days)
     with common.get_db_context() as db:
@@ -343,6 +343,7 @@ def select_bid_candidates(
             .filter(func.lower(Project.status).in_(allowed_statuses))
             .filter(Project.created_at >= cutoff)
             .filter(~Project.freelancer_id.in_(already_bid_subq))
+            .filter(~Project.freelancer_id.in_(db.query(BidSubmission.project_freelancer_id)))
         )
         if fixed_price_only:
             query = query.filter(or_(Project.type_id == 1, Project.type_id.is_(None)))
@@ -422,6 +423,14 @@ async def _step_auto_bid(
             logger.warning("Cannot determine bid amount for project %s, skipping", pid)
             continue
         currency = candidate.get("currency_code") or "USD"
+        amount_currency = "USD" if candidate.get("suggested_bid") else currency
+        if amount_currency != currency:
+            from utils.currency_converter import get_currency_converter
+            rate = get_currency_converter().get_rate_sync(currency)
+            if rate is None or rate <= 0:
+                logger.error("Cannot convert suggested amount for project %s", pid)
+                continue
+            amount = round(amount / rate, 2)
 
         period = _determine_bid_period(candidate)
 
@@ -448,7 +457,7 @@ async def _step_auto_bid(
                     amount=amount,
                     period=period,
                     description=None,  # Let ProposalService generate
-                    validate_remote_status=True,
+                    amount_currency=currency,
                 )
                 submitted_amount = float(result.get("amount", amount)) if isinstance(result, dict) else float(amount)
                 # Mark project as bid_submitted
@@ -712,7 +721,7 @@ async def run_cycle(
             )
 
         # Telegram 人工确认环节（可选）
-        if confirm_enabled:
+        if confirm_enabled and not dry_run:
             bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
             chat_id = os.getenv("TELEGRAM_CHAT_ID")
             if bot_token and chat_id:
@@ -735,15 +744,16 @@ async def run_cycle(
                     return summary
                 summary["confirm_result"] = f"{len(candidates)}_approved"
             else:
-                logger.warning(
-                    "--confirm enabled but TELEGRAM_BOT_TOKEN/CHAT_ID not set, "
-                    "proceeding without confirmation"
-                )
+                logger.error("Confirmation required but Telegram is not configured; bidding blocked")
+                summary.update(bids_submitted=0, bids_failed=0, confirm_result="not_configured")
+                _attach_weekly_report()
+                return summary
 
         bid_results = await _step_auto_bid(candidates, dry_run, logger)
         summary["bids_submitted"] = sum(
-            1 for r in bid_results if r.get("status") in ("submitted", "dry_run")
+            1 for r in bid_results if r.get("status") == "submitted"
         )
+        summary["bids_previewed"] = sum(1 for r in bid_results if r.get("status") == "dry_run")
         summary["bids_failed"] = sum(
             1 for r in bid_results if r.get("status") == "error"
         )
@@ -767,7 +777,7 @@ async def _morning_batch_bid(
     dry_run: bool,
     confirm_timeout: int,
     logger: logging.Logger,
-    auto_approve: bool = True,
+    auto_approve: bool = False,
 ) -> Dict[str, Any]:
     """8:00 起床批次：将夜间积累的候选推送 Telegram 确认，等待用户决策后投标。"""
     summary: Dict[str, Any] = {}
@@ -780,7 +790,7 @@ async def _morning_batch_bid(
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if bot_token and chat_id:
+    if not auto_approve and not dry_run and bot_token and chat_id:
         try:
             from telegram_confirm import TelegramConfirm
 
@@ -797,10 +807,9 @@ async def _morning_batch_bid(
                 "Morning batch Telegram confirmation failed: %s", exc,
             )
             candidates = []  # 安全默认：不投标
-    else:
-        logger.warning(
-            "Morning batch: Telegram not configured, proceeding without confirmation",
-        )
+    elif not auto_approve and not dry_run:
+        logger.error("Morning batch confirmation required but Telegram is not configured; bidding blocked")
+        candidates = []
 
     if not candidates:
         logger.info("Morning batch: no candidates approved, skipping bid")
@@ -811,8 +820,9 @@ async def _morning_batch_bid(
     logger.info("Morning batch: bidding on %d approved candidates...", len(candidates))
     bid_results = await _step_auto_bid(candidates, dry_run, logger)
     summary["bids_submitted"] = sum(
-        1 for r in bid_results if r.get("status") in ("submitted", "dry_run")
+        1 for r in bid_results if r.get("status") == "submitted"
     )
+    summary["bids_previewed"] = sum(1 for r in bid_results if r.get("status") == "dry_run")
     summary["bids_failed"] = sum(
         1 for r in bid_results if r.get("status") == "error"
     )
@@ -853,10 +863,16 @@ def main(argv=None) -> int:
         "--max-bids-per-cycle", type=int, default=3,
         help="Max bids per cycle (default: 3)",
     )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Preview mode: no real bids submitted",
+    submission_mode = parser.add_mutually_exclusive_group()
+    submission_mode.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+        help="Preview mode: no real bids submitted (default)",
     )
+    submission_mode.add_argument(
+        "--submit", dest="dry_run", action="store_false",
+        help="Explicitly enable real bidding after local validation",
+    )
+    parser.set_defaults(dry_run=True)
     parser.add_argument(
         "--once", action="store_true",
         help="Run a single cycle then exit",
@@ -946,6 +962,11 @@ def main(argv=None) -> int:
         return common.EXIT_VALIDATION_ERROR
 
     _promote_telegram_proxy_env(logger)
+    if args.confirm and not args.dry_run and not (
+        os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")
+    ):
+        logger.error("--confirm requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; bidding blocked")
+        return common.EXIT_VALIDATION_ERROR
 
     if not args.keep_proxy:
         for key in _PROXY_ENV_KEYS:
@@ -1008,6 +1029,7 @@ def main(argv=None) -> int:
                     dry_run=args.dry_run,
                     confirm_timeout=args.confirm_timeout,
                     logger=logger,
+                    auto_approve=not args.confirm,
                 ))
                 logger.info(
                     "🌅 Morning batch done: %d bids submitted",
@@ -1035,7 +1057,7 @@ def main(argv=None) -> int:
                 dry_run=args.dry_run,
                 fixed_price_only=fixed_price_only,
                 logger=logger,
-                confirm_enabled=args.confirm and not night_mode,
+                confirm_enabled=args.confirm,
                 confirm_timeout=args.confirm_timeout,
                 skip_bid=night_skip_bid,
                 weekly_report_enabled=args.weekly_report,

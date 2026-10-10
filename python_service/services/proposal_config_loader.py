@@ -9,6 +9,7 @@ for personas, styles, structures, and validation rules.
 import yaml
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -40,7 +41,7 @@ class ProposalConfigLoader:
     _config: Dict[str, Any] = {}
     _loaded: bool = False
     # Default path, relative to project root or python_service root
-    DEFAULT_CONFIG_PATH = "python_service/config/bid_prompts.yaml"
+    DEFAULT_CONFIG_PATH = str(Path(__file__).resolve().parents[1] / "config" / "bid_prompts.yaml")
 
     @classmethod
     def load_config(cls, config_path: str = DEFAULT_CONFIG_PATH) -> bool:

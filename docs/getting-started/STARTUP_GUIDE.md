@@ -69,10 +69,11 @@ LLM_MODEL=deepseek-chat
 
 ### 2.1 Python 后端环境
 建议使用 Conda 或 venv。
+当前固定依赖建议使用 Python 3.12；不要直接使用系统 Python 3.14 安装旧版 Pydantic。
 
 ```bash
 # 创建虚拟环境
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate  # Linux/Mac
 # .venv\Scripts\activate   # Windows
 
@@ -85,7 +86,7 @@ pip install -r python_service/requirements.txt
 
 ```bash
 cd typescript
-npm install
+npm ci --ignore-scripts
 # 启动开发服务器
 npm run dev
 ```

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Dict, Optional
 import httpx
 
@@ -18,7 +19,7 @@ class CurrencyConverter:
     """
     
     API_URL = "https://api.frankfurter.app/latest"
-    CACHE_FILE = "data/currency_rates.json"
+    CACHE_FILE = str(Path(__file__).resolve().parents[1] / "data" / "currency_rates.json")
     CACHE_TTL = 24 * 3600  # 24 hours
     FALLBACK_RATES = {
         "INR": 0.012,

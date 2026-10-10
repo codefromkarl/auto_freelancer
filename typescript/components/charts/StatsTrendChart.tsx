@@ -26,7 +26,7 @@ export function StatsTrendChart() {
     <Card className="col-span-1 md:col-span-2">
       <CardHeader>
         <CardTitle>每日趋势</CardTitle>
-        <CardDescription>每日新增项目与自动投标数量</CardDescription>
+        <CardDescription>演示数据：尚未接入历史统计</CardDescription>
       </CardHeader>
       <CardContent className="h-[300px]">
         <ResponsiveContainer width="100%" height={300} minWidth={0} minHeight={0}>

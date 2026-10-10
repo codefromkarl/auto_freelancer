@@ -1,144 +1,48 @@
 import asyncio
-import sys
-from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
+from database.connection import Base
+from database.models import Project
 from services import bid_service
 
 
-class _FakeBidStatusField:
-    def in_(self, _values):
-        return True
+@pytest.mark.parametrize("amount,currency,expected", [
+    (585.0, "USD", 39000.0), (40000.0, "INR", 40000.0),
+    (585.0, "INR", 585.0), (585.0, None, 585.0),
+])
+def test_bid_currency_is_explicit(monkeypatch, amount, currency, expected):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    client = SimpleNamespace(user_id=999,
+        get_project=AsyncMock(return_value={"status": "open"}),
+        create_bid=AsyncMock(return_value={"id": 112233, "bidder_id": 999}))
+    monkeypatch.setattr(bid_service, "get_freelancer_client", lambda: client)
+    monkeypatch.setattr(bid_service, "get_currency_converter", lambda: SimpleNamespace(get_rate_sync=lambda _: 0.015))
+    monkeypatch.setattr(bid_service, "check_content_risk", lambda *_: (True, "ok"))
+    with Session(engine) as db:
+        db.add(Project(freelancer_id=123, title="INR Project", currency_code="INR", suggested_bid=585))
+        db.commit()
+        result = asyncio.run(bid_service.create_bid(db, 123, amount, 7, "Final proposal", amount_currency=currency))
+        assert result["amount"] == expected
+        assert client.create_bid.call_args.kwargs["amount"] == expected
+    engine.dispose()
 
 
-class _FakeBidModel:
-    status = _FakeBidStatusField()
-
-    def __init__(self, **kwargs):
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-
-class _FakeProject:
-    def __init__(self):
-        self.id = 1
-        self.freelancer_id = 40136605
-        self.title = "INR Project"
-        self.description = "desc"
-        self.preview_description = "preview"
-        self.status = "active"
-        self.currency_code = "INR"
-        self.budget_minimum = 37500
-        self.budget_maximum = None
-        self.suggested_bid = 585.0  # USD suggested by AI
-        self.ai_proposal_draft = None
-
-
-class _FakeQuery:
-    def __init__(self, item):
-        self._item = item
-
-    def filter_by(self, **_kwargs):
-        return self
-
-    def filter(self, *_args, **_kwargs):
-        return self
-
-    def first(self):
-        return self._item
-
-
-class _FakeDB:
-    def __init__(self, project):
-        self.project = project
-        self.added = []
-
-    def query(self, model):
-        if model is bid_service.Project:
-            return _FakeQuery(self.project)
-        return _FakeQuery(None)
-
-    def add(self, item):
-        self.added.append(item)
-
-    def commit(self):
-        return None
-
-    def refresh(self, _obj):
-        return None
-
-
-class _FakeClient:
-    user_id = 999
-
-    def __init__(self):
-        self.sent_amount = None
-
-    async def create_bid(self, project_id, amount, period, description):
-        self.sent_amount = amount
-        return {
-            "result": {
-                "id": 112233,
-                "bidder_id": 999,
-            }
-        }
-
-
-class _FakeConverter:
-    def get_rate_sync(self, currency_code):
-        assert currency_code == "INR"
-        return 0.015  # 1 INR = 0.015 USD
-
-
-def test_create_bid_converts_suggested_usd_amount_to_project_currency(monkeypatch):
-    fake_project = _FakeProject()
-    fake_db = _FakeDB(fake_project)
-    fake_client = _FakeClient()
-
-    monkeypatch.setattr(bid_service, "Bid", _FakeBidModel)
-    monkeypatch.setattr(bid_service, "get_freelancer_client", lambda: fake_client)
-    monkeypatch.setattr(bid_service, "get_currency_converter", lambda: _FakeConverter(), raising=False)
-
-    result = asyncio.run(
-        bid_service.create_bid(
-            db=fake_db,
-            project_id=fake_project.freelancer_id,
-            amount=585.0,
-            period=7,
-            description="x" * 120,
-            skip_content_check=True,
-            validate_remote_status=False,
-        )
-    )
-
-    assert fake_client.sent_amount == 39000.0
-    assert result["amount"] == 39000.0
-
-
-def test_create_bid_keeps_non_suggested_amount_unchanged(monkeypatch):
-    fake_project = _FakeProject()
-    fake_db = _FakeDB(fake_project)
-    fake_client = _FakeClient()
-
-    monkeypatch.setattr(bid_service, "Bid", _FakeBidModel)
-    monkeypatch.setattr(bid_service, "get_freelancer_client", lambda: fake_client)
-    monkeypatch.setattr(bid_service, "get_currency_converter", lambda: _FakeConverter(), raising=False)
-
-    result = asyncio.run(
-        bid_service.create_bid(
-            db=fake_db,
-            project_id=fake_project.freelancer_id,
-            amount=40000.0,
-            period=7,
-            description="x" * 120,
-            skip_content_check=True,
-            validate_remote_status=False,
-        )
-    )
-
-    assert fake_client.sent_amount == 40000.0
-    assert result["amount"] == 40000.0
+def test_missing_exchange_rate_blocks_native_amount(monkeypatch):
+    monkeypatch.setattr(bid_service, "get_currency_converter", lambda: SimpleNamespace(get_rate_sync=lambda _: None))
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    client = SimpleNamespace(create_bid=AsyncMock())
+    monkeypatch.setattr(bid_service, "get_freelancer_client", lambda: client)
+    with Session(engine) as db:
+        db.add(Project(freelancer_id=123, title="Unknown Currency", currency_code="XXX"))
+        db.commit()
+        with pytest.raises(ValueError, match="missing exchange rate"):
+            asyncio.run(bid_service.create_bid(db, 123, 100, 7, "Final proposal"))
+    client.create_bid.assert_not_called()
+    engine.dispose()

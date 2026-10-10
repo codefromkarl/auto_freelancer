@@ -18,6 +18,7 @@ from middleware.error_handler import (
 )
 
 # Configure logging
+Path(settings.LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper()),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -55,8 +56,8 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -131,6 +132,7 @@ from api import projects, bids, milestones, messages, ai_replies, kickoff, clien
 # Include routers
 app.include_router(
     configuration.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=settings.API_V1_PREFIX,
     tags=["Configuration"]
 )
@@ -143,41 +145,49 @@ async def print_routes():
         logging.info(f"Route: {route.path} [{getattr(route, 'methods', '')}]")
 app.include_router(
     projects.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/projects",
     tags=["Projects"]
 )
 app.include_router(
     bids.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/bids",
     tags=["Bids"]
 )
 app.include_router(
     proposals.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/proposals",
     tags=["Proposals"]
 )
 app.include_router(
     milestones.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/milestones",
     tags=["Milestones"]
 )
 app.include_router(
     messages.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/messages",
     tags=["Messages"]
 )
 app.include_router(
     ai_replies.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/ai-replies",
     tags=["AI Replies"]
 )
 app.include_router(
     kickoff.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/kickoff",
     tags=["Kick-off"]
 )
 app.include_router(
     client_risk.router,
+    dependencies=[Depends(verify_api_key)],
     prefix=f"{settings.API_V1_PREFIX}/risk",
     tags=["Client Risk"]
 )

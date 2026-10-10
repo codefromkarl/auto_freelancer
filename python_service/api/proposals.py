@@ -18,6 +18,7 @@ class CreateProposalRequest(BaseModel):
     """Request model for creating a proposal (bid)."""
     project_id: int = Field(gt=0)
     amount: float = Field(gt=0)
+    amount_currency: Optional[str] = Field(None, pattern=r"^[A-Z]{3}$")
     period: int = Field(default=7, ge=1, le=365)
     description: Optional[str] = Field(None, min_length=10, max_length=5000)
 
@@ -71,7 +72,7 @@ async def get_proposals(
     # Transform bid data to proposal format
     proposal_data = []
     for bid in result.get("data", []):
-        proposal_data = {
+        proposal = {
             "id": bid.get("id"),
             "project_id": bid.get("project_id"),
             "project_title": bid.get("project_title", ""),
@@ -85,7 +86,7 @@ async def get_proposals(
             "competitor_count": bid.get("competitor_count", 0),
             "win_probability": bid.get("win_probability", 0),
         }
-        proposal_data.append(proposal_data)
+        proposal_data.append(proposal)
 
     return APIResponse(
         status="success",
@@ -137,7 +138,8 @@ async def create_proposal(
             request.project_id,
             request.amount,
             request.period,
-            request.description
+            request.description,
+            amount_currency=request.amount_currency,
         )
         return APIResponse(status="success", data=bid_data)
 

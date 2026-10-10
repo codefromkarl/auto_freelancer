@@ -4,6 +4,10 @@ Configuration management for Freelancer Python API Service.
 
 from pydantic_settings import BaseSettings
 from typing import Optional, List, Dict, Any
+from pathlib import Path
+
+SERVICE_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_ROOT.parent
 
 
 class LLMConfig(BaseSettings):
@@ -25,6 +29,7 @@ class Settings(BaseSettings):
     # API Configuration
     PYTHON_API_KEY: str
     API_V1_PREFIX: str = "/api/v1"
+    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
     # LLM 配置（支持多个 API 并行调用）
     # 支持的 provider: openai, zhipu, anthropic, deepseek
@@ -70,11 +75,11 @@ class Settings(BaseSettings):
     PROPOSAL_TARGET_CHAR_MAX: int = 1200
 
     # Database Configuration
-    DATABASE_PATH: str = "/app/data/freelancer.db"
+    DATABASE_PATH: str = str(SERVICE_ROOT / "data" / "freelancer.db")
 
     # Logging Configuration
     LOG_LEVEL: str = "INFO"
-    LOG_FILE: str = "/app/logs/python_service.log"
+    LOG_FILE: str = str(REPO_ROOT / "logs" / "python_service.log")
 
     # Application Configuration
     APP_NAME: str = "Freelancer Python API"
@@ -175,7 +180,7 @@ class Settings(BaseSettings):
     TRELLO_TOKEN: str = ""
 
     # External Scoring Configuration
-    SCORING_CONFIG_PATH: str = "python_service/config/scoring_rules.yaml"
+    SCORING_CONFIG_PATH: str = str(SERVICE_ROOT / "config" / "scoring_rules.yaml")
     _scoring_rules: Optional[Dict[str, Any]] = None
 
     @property
@@ -206,7 +211,7 @@ class Settings(BaseSettings):
         return self._scoring_rules
 
     class Config:
-        env_file = ".env"
+        env_file = (str(SERVICE_ROOT / ".env"), str(REPO_ROOT / ".env"))
         case_sensitive = True
         extra = "ignore"  # 忽略未定义的 env 变量
 

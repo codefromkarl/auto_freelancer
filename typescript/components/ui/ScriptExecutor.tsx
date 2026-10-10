@@ -25,21 +25,13 @@ export function ScriptExecutor({ scriptName, title, description, onLog }: Script
     try {
       if (scriptName === 'search_projects') {
         await triggerScript('refresh_projects');
-        // Simulate progress
-        onLog('正在抓取新项目...', 'info');
-        await new Promise((r) => setTimeout(r, 2000));
-        onLog('抓取完成，更新数据库', 'success');
+        onLog('已请求同步，请在项目列表查看实际更新结果', 'info');
       } else if (scriptName === 'score_all') {
-        await triggerScript('score_all'); // Assuming api supports this
-        onLog('开始批量评分...', 'info');
-        await new Promise((r) => setTimeout(r, 3000));
-        onLog('评分完成: 处理了 5 个项目', 'success');
+        await triggerScript('score_all');
       } else {
         await triggerScript(scriptName);
         onLog('执行完成', 'success');
       }
-
-      onLog(`执行成功: ${title}`, 'success');
     } catch (error) {
       onLog(`执行失败: ${error}`, 'error');
     } finally {

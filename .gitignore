@@ -12,7 +12,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -32,6 +32,13 @@ venv/
 ENV/
 env/
 .venv
+.runtime/
+
+# Frontend build and dependencies
+typescript/node_modules/
+typescript/.next/
+typescript/next-env.d.ts
+typescript/*.tsbuildinfo
 *.virtualenv
 miniconda3/
 

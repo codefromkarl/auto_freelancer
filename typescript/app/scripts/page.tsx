@@ -36,18 +36,14 @@ export default function ScriptsPage() {
     try {
       if (scriptName === 'search_projects') {
         addLog('正在调用 API 抓取新项目...', 'info');
-        const res = await triggerScript('refresh_projects');
-        addLog(`抓取成功: 获取了 ${res.data?.total || 0} 个项目`, 'success');
+        await triggerScript('refresh_projects');
+        addLog('同步请求已发送，请在项目列表查看实际更新结果', 'info');
       } else if (scriptName === 'score_all') {
         addLog('正在启动批量评分任务...', 'info');
         await triggerScript('score_all');
-        addLog('评分任务已触发 (模拟批处理)', 'success');
       } else {
-        await new Promise((r) => setTimeout(r, 1000));
-        addLog('未知脚本', 'error');
+        throw new Error('未知脚本');
       }
-
-      addLog(`任务完成: ${label}`, 'success');
     } catch (error: any) {
       addLog(`执行失败: ${error.message || '未知错误'}`, 'error');
     } finally {
