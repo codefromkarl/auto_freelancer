@@ -4,6 +4,8 @@ Review high-scoring projects and generate a report.
 """
 import argparse
 import asyncio
+import json
+import hashlib
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -14,9 +16,12 @@ script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(script_dir))
 
 import common
-from database.models import Project
+from database.models import Project, AuditLog
+from services.project_service import published_since
+from services.scoring_policy import score_is_current, policy_signature
 from services import bid_service
-from services import competitor_bid_service
+from services.proposal_competition import load_competitor_context, POLICY_VERSION
+from services.proposal_review_display import review_summary
 
 
 async def _refresh_remote_status_and_filter(db, projects, logger):
@@ -93,17 +98,23 @@ def main(argv=None) -> int:
                 db.query(Project)
                 .filter(Project.ai_score >= args.threshold)
                 .filter(func.lower(Project.status).in_(allowed_statuses))
-                .filter(Project.created_at >= cutoff_time)
+                .filter(published_since(cutoff_time))
                 .order_by(Project.ai_score.desc())
                 .all()
             )
             if not args.include_hourly:
                 projects = [p for p in projects if getattr(p, "type_id", None) == 1]
-            projects, remote_filtered = asyncio.run(
-                _refresh_remote_status_and_filter(db, projects, logger)
-            )
-
-            headers = ["ID", "Title", "Budget", "Score", "Reason", "Competition"]
+            signature = policy_signature(db)
+            from services import workflow_service as workflow
+            workflow.reconcile(db)
+            projects = [p for p in projects if score_is_current(p, signature)
+                and workflow.refresh_readiness(db, p, args.threshold, signature).state in {"ready", "awaiting_approval"}]
+            awaiting = [p for p in projects if workflow.ensure(db, p).state == "awaiting_approval"]
+            ready = [p for p in projects if workflow.ensure(db, p).state == "ready"]
+            ready, remote_filtered = asyncio.run(_refresh_remote_status_and_filter(db, ready, logger))
+            projects = list({p.freelancer_id: p for p in awaiting + ready}.values())
+            projects = [p for p in projects if workflow.refresh_readiness(db, p, args.threshold, signature).state in {"ready", "awaiting_approval"}]
+            headers = ["ID", "Title", "Budget", "Score", "Reason", "Competition", "Workflow"]
             rows = []
             competition_details = []
             for project in projects:
@@ -115,18 +126,30 @@ def main(argv=None) -> int:
                 score = f"{project.ai_score:.1f}" if project.ai_score is not None else "0.0"
 
                 # Competition analysis summary
-                analysis = competitor_bid_service.analyze_competition(db, project.freelancer_id)
-                if analysis:
-                    amt = analysis.get("amount", {})
+                analysis = load_competitor_context(db, project)
+                if analysis['status'] == 'ready':
+                    median = analysis['price'].get('median')
                     comp_summary = (
-                        f"{analysis['active_bids']}bids "
-                        f"${amt.get('median', 0):.0f}med"
+                        f"{analysis['visible_count']} public "
+                        f"{median:g} {analysis['currency']} med" if median else 'No public prices'
                     )
-                    competition_details.append((project.freelancer_id, analysis))
                 else:
-                    comp_summary = "N/A"
+                    comp_summary = f"N/A ({analysis['status']})"
+                review = None
+                audit = db.query(AuditLog).filter_by(action='proposal_evaluation',entity_type='project',
+                    entity_id=project.freelancer_id).order_by(AuditLog.id.desc()).first()
+                if audit and project.ai_proposal_draft:
+                    try:
+                        saved = json.loads(audit.response_data)
+                        if (saved.get('policy_version') == POLICY_VERSION and saved.get('context_digest') == analysis['digest']
+                                and saved.get('text_digest') == hashlib.sha256(project.ai_proposal_draft.encode()).hexdigest()):
+                            review = saved
+                    except (ValueError,TypeError):
+                        pass
+                competition_details.append((project.freelancer_id, analysis, review))
 
-                rows.append([str(project.freelancer_id), title, budget, score, reason, comp_summary])
+                state_label = "待审批" if workflow.ensure(db, project).state == "awaiting_approval" else "可准备"
+                rows.append([str(project.freelancer_id), title, budget, score, reason, comp_summary, state_label])
 
         col_widths = [len(h) for h in headers]
         for row in rows:
@@ -159,20 +182,21 @@ def main(argv=None) -> int:
         comp_lines = []
         if competition_details:
             comp_lines.append("\n--- Competition Analysis ---\n")
-            for pid, analysis in competition_details:
-                amt = analysis.get("amount", {})
+            for pid, analysis, review in competition_details:
+                amt = analysis.get("price", {}) if analysis['status']=='ready' else {}
                 per = analysis.get("period", {})
-                rep = analysis.get("reputation", {})
                 comp_lines.append(
                     f"Project {pid}: "
-                    f"bids={analysis['active_bids']}/{analysis['total_bids']} "
-                    f"amount=[${amt.get('min', 0):.0f}-${amt.get('max', 0):.0f}, "
-                    f"med=${amt.get('median', 0):.0f}, avg=${amt.get('avg', 0):.0f}] "
-                    f"period=[{per.get('min', '?')}-{per.get('max', '?')}d, "
-                    f"med={per.get('median', '?')}d] "
-                    f"rep_avg={rep.get('avg', 'N/A')} "
-                    f"top_bidders={rep.get('top_bidders', 0)}"
+                    f"status={analysis['status']}, complete={analysis['complete']}, "
+                    f"public={analysis['visible_count']}/{analysis['total_bids']}, "
+                    f"median={amt.get('median','unknown')} {analysis['currency']}, "
+                    f"period_median={per.get('median','unknown')}d"
                 )
+                if review:
+                    comp_lines.append(review_summary(review))
+                    comp_lines.extend('  - '+note for note in review['findings'])
+                else:
+                    comp_lines.append('当前草稿尚未按最终报价/工期与当前竞标快照评估，请在准备候选时评估。')
         comp_text = "\n".join(comp_lines)
 
         report_path.write_text(

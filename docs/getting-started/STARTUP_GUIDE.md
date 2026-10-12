@@ -50,18 +50,19 @@ LLM_MODEL=deepseek-chat
 # ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
 ```
 
-### 1.3 配置 Telegram 通知 (可选)
+### 1.3 配置 QQ Bot 通知与审批
 
-如果你希望手机接收高分项目通知：
+AppID/AppSecret 放在项目 `.env.qqbot`（Git 忽略、权限 0600），不要放进代码。运行 `.venv/bin/python scripts/manual_pipeline/run_qqbot.py --once-ready` 验证鉴权与 Gateway。
 
-1. 在 Telegram 中搜索 `@BotFather`。
-2. 发送 `/newbot` 创建机器人，获取 **Token**。
-3. 搜索 `@userinfobot` 获取你自己的 **Chat ID**。
-4. 在 `.env` 中填入：
-   ```bash
-   TELEGRAM_BOT_TOKEN=123456789:ABCDefGhiJklMnoPqrStuVwxYz
-   TELEGRAM_CHAT_ID=987654321
-   ```
+正常运行接收器后，在机器人私聊或群中发送 `身份`。将返回的接收对象和审批者 OpenID 写入本地配置：
+
+```dotenv
+QQ_BOT_TARGET_TYPE=c2c
+QQ_BOT_TARGET_ID=接收对象OpenID
+QQ_BOT_APPROVER_OPENIDS=审批者OpenID
+```
+
+机器人不会把第一位发消息的人自动授权为审批者。详细配置与签名回调见 [QQ Bot 接入指南](QQBOT_GUIDE.md)。
 
 ---
 

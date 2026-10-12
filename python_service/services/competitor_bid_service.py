@@ -12,13 +12,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import statistics
+import json
+import math
+import hashlib
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from database.models import Bid, CompetitorBid, CompetitorBidContent, Project
+from database.models import Bid, CompetitorBid, CompetitorBidContent, Project, AuditLog
+from config import settings
 from services.freelancer_client import FreelancerAPIError, get_freelancer_client
 
 logger = logging.getLogger(__name__)
@@ -81,6 +85,7 @@ def _extract_bid_description(bid: Dict[str, Any]) -> Optional[str]:
 async def fetch_and_save_bids(
     db: Session,
     project_freelancer_id: int,
+    *, raise_on_error: bool = False,
 ) -> int:
     """Fetch competitor bids for a single project and upsert into DB.
 
@@ -109,11 +114,25 @@ async def fetch_and_save_bids(
             project_freelancer_id,
             exc.message,
         )
+        db.add(AuditLog(action='competitor_snapshot', entity_type='project',
+            entity_id=project_freelancer_id, status='error', error_message=type(exc).__name__))
+        db.commit()
+        if raise_on_error:
+            raise
         return 0
 
     _ensure_competitor_bid_content_table(db)
     upserted = 0
-    for bid in raw_bids:
+    fetched_at = datetime.utcnow()
+    if (not isinstance(raw_bids,list) or len(raw_bids)>400
+            or any(not isinstance(bid,dict) or not isinstance(bid.get('id'),int)
+                   or isinstance(bid.get('id'),bool) or bid['id']<=0 for bid in raw_bids)):
+        raise ValueError('Invalid bounded competitor snapshot')
+    unique = {bid['id']: bid for bid in raw_bids if isinstance(bid, dict) and isinstance(bid.get('id'), int)}
+    if any(b.get('project_id', project_freelancer_id) != project_freelancer_id for b in unique.values()):
+        raise ValueError('Competitor snapshot contains another project')
+    public_ids, price_ids, material = [], [], []
+    for bid in unique.values():
         bid_id = bid.get("id")
         if bid_id is None:
             continue
@@ -126,11 +145,31 @@ async def fetch_and_save_bids(
 
         amount = bid.get("amount")
         period = bid.get("period")
+        if (not isinstance(period,(int,float)) or isinstance(period,bool)
+                or not math.isfinite(period) or period<=0 or int(period)!=period):
+            period = None
         retracted = bid.get("retracted", False)
         award_status = bid.get("award_status", "pending")
         reputation = bid.get("reputation")
-        description = _extract_bid_description(bid)
+        if not isinstance(reputation, (int, float)) or not math.isfinite(reputation):
+            reputation = None
+        visible = not bid.get('sealed') and not retracted
+        description = _extract_bid_description(bid) if visible else None
         bidder_id = bid.get("bidder_id", 0)
+        ours = str(bidder_id) == settings.FREELANCER_USER_ID
+        if description and not ours:
+            public_ids.append(bid_id)
+        try:
+            amount = float(amount) if amount is not None else None
+            if amount is not None and not math.isfinite(amount):
+                amount = None
+        except (TypeError, ValueError):
+            amount = None
+        if visible and not ours and amount is not None and amount > 0:
+            price_ids.append(bid_id)
+        material.append({'id': bid_id, 'amount': amount, 'period': period,
+            'visible': visible, 'ours': ours,
+            'text_hash': hashlib.sha256((description or '').encode()).hexdigest()})
 
         if existing:
             existing.amount = amount
@@ -138,6 +177,7 @@ async def fetch_and_save_bids(
             existing.retracted = retracted
             existing.award_status = award_status
             existing.reputation = reputation
+            existing.fetched_at = fetched_at
         else:
             db.add(CompetitorBid(
                 bid_id=bid_id,
@@ -149,6 +189,7 @@ async def fetch_and_save_bids(
                 retracted=retracted,
                 award_status=award_status,
                 reputation=reputation,
+                fetched_at=fetched_at,
             ))
 
         if description:
@@ -160,7 +201,7 @@ async def fetch_and_save_bids(
             if content:
                 content.bidder_id = bidder_id
                 content.description = description
-                content.fetched_at = datetime.utcnow()
+                content.fetched_at = fetched_at
             else:
                 db.add(
                     CompetitorBidContent(
@@ -169,14 +210,34 @@ async def fetch_and_save_bids(
                         project_freelancer_id=project_freelancer_id,
                         bidder_id=bidder_id,
                         description=description,
-                        fetched_at=datetime.utcnow(),
+                        fetched_at=fetched_at,
                     )
                 )
+        else:
+            # A previously public proposal must disappear when it becomes sealed/empty.
+            db.query(CompetitorBidContent).filter_by(bid_id=bid_id).delete(synchronize_session=False)
         upserted += 1
 
     # 标记拉取时间，供增量策略使用
     if project is not None:
-        project.competitor_bids_fetched_at = datetime.utcnow()
+        project.competitor_bids_fetched_at = fetched_at
+    complete = len(raw_bids) < 400
+    if complete:
+        for model in (CompetitorBidContent, CompetitorBid):
+            query = db.query(model).filter_by(project_freelancer_id=project_freelancer_id)
+            if unique:
+                query = query.filter(model.bid_id.notin_(unique))
+            query.delete(synchronize_session=False)
+    digest = hashlib.sha256(json.dumps(sorted(material, key=lambda b:b['id']),
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    metadata = {'version': 1, 'fetched_at': fetched_at.isoformat(),
+        'account_id': settings.FREELANCER_USER_ID,
+        'currency': project.currency_code, 'complete': complete,
+        'total_bids': len(unique), 'sealed_bids': sum(bool(b.get('sealed')) for b in unique.values()),
+        'retracted_bids': sum(bool(b.get('retracted')) for b in unique.values()),
+        'public_ids': public_ids, 'price_ids': price_ids, 'source_digest': digest}
+    db.add(AuditLog(action='competitor_snapshot', entity_type='project', entity_id=project_freelancer_id,
+        response_data=json.dumps(metadata), status='success', created_at=fetched_at))
     db.commit()
     logger.info(
         "Upserted %d competitor bids for project %s",

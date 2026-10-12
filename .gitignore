@@ -57,6 +57,7 @@ miniconda3/
 # Environment & Secrets
 # =============================================================================
 .env
+.env.qqbot
 .env.local
 .env.*.local
 .env.development

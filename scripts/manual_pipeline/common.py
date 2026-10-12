@@ -7,6 +7,8 @@ import fcntl
 import logging
 import os
 import sys
+from io import StringIO
+from dotenv import dotenv_values
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Generator, Mapping, Optional, Tuple
@@ -47,21 +49,7 @@ def resolve_env_file(repo_root: Path = REPO_ROOT) -> Path:
 
 
 def parse_env_lines(text: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if key:
-            values[key] = value
-    return values
+    return {key: value or '' for key, value in dotenv_values(stream=StringIO(text), interpolate=False).items()}
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -165,37 +153,6 @@ def get_db_context() -> Generator[object, None, None]:
         raise
     finally:
         session.close()
-
-
-def get_telegram_proxies() -> Optional[dict[str, str]]:
-    """
-    Build explicit Telegram proxy settings from env.
-    Prioritizes TELEGRAM_PROXY, then falls back to global proxies.
-    """
-    keys = [
-        "TELEGRAM_PROXY",
-        "TELEGRAM_HTTPS_PROXY",
-        "TELEGRAM_HTTP_PROXY",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ]
-    
-    proxy = None
-    for key in keys:
-        val = os.getenv(key)
-        if val and val.strip():
-            proxy = val.strip()
-            break
-            
-    if not proxy:
-        return None
-        
-    if "://" not in proxy:
-        proxy = f"http://{proxy}"
-        
-    return {"http": proxy, "https": proxy}
 
 
 class FileLock:

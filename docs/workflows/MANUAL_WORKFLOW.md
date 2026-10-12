@@ -29,13 +29,13 @@ python scripts/manual_pipeline/run_until_bid.py --since-days 1 --threshold 7.0
 
 ## 模式二：定时调度 (Scheduler)
 
-适合长期后台运行。默认基础间隔 3 分钟，白天实际约 3–6 分钟，夜间约 8–12 分钟。默认执行抓取、评分和投标预览；真实投标必须显式传入 `--submit`。
+适合长期后台运行。默认每 30 分钟轮询一次；收集模式在夜间暂停候选准备与提交。默认执行抓取、评分和投标预览；真实投标必须显式传入 `--submit`。
 
 **功能特点：**
 - 自动维护一个 `pipeline.lock` 文件，防止重复运行。
-- 集成了 Telegram 通知，发现高分项目直接推送到手机。
+- 集成了 QQ Bot 通知，发现高分项目直接推送到手机。
 - 自动跳过已处理的项目。
-- 开启 `--confirm` 后，Telegram 配置缺失、确认失败或超时均禁止投标，夜间同样生效。
+- 开启 `--confirm` 后，QQ Bot 配置缺失、确认失败或超时均禁止投标，夜间同样生效。
 
 **命令：**
 ```bash
@@ -64,7 +64,7 @@ nohup python scripts/manual_pipeline/scheduler.py > logs/scheduler.log 2>&1 &
 | 2. 数据抓取 | `02_fetch.py` | 从 Freelancer API 拉取项目存入 SQLite |
 | 3. AI 评分 | `03_score_concurrent.py` | 使用 LLM 并发评分 |
 | 4. 人工复核 | `04_review.py` | 生成文本报告，列出 Top 项目 |
-| 5. 投标执行 | `05_bid.py` | **慎用**。生成投标内容或实际提交 |
+| 5. 投标执行 | `05_bid.py` | **仅准备候选**。生成投标内容或实际提交 |
 
 **投标脚本用法：**
 ```bash

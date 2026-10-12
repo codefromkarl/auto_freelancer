@@ -1,7 +1,7 @@
-# Scoring Weights (Optimized for Speed and Win Rate)
+# Scoring preference weights (not calibrated win probabilities)
 weights:
   budget_efficiency: 0.15
-  competition: 0.30     # Increased: healthy competition is the best predictor
+  competition: 0.30     # Continuous congestion and recency preference
   clarity: 0.20
   customer: 0.20
   tech: 0.10

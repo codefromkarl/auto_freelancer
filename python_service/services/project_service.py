@@ -1,10 +1,12 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, case, cast, Float
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import json
 import asyncio
+import math
+import re
 
 from database.models import Project
 from services.freelancer_client import get_freelancer_client, FreelancerAPIError
@@ -37,7 +39,10 @@ def _check_skill_match(project_dict: Dict[str, Any]) -> bool:
     """
     # 获取项目的标题、描述和技能列表
     title = (project_dict.get('title') or '').lower()
-    description = (project_dict.get('preview_description') or project_dict.get('description') or '').lower()
+    description = (
+        project_dict.get('full_description') or project_dict.get('description')
+        or project_dict.get('preview_description') or ''
+    ).lower()
     project_jobs = project_dict.get('jobs', [])
 
     # 收集所有简历技能关键词
@@ -47,7 +52,21 @@ def _check_skill_match(project_dict: Dict[str, Any]) -> bool:
 
     # 检查标题和描述中是否包含简历关键词
     text_content = f"{title} {description}"
-    text_match = any(keyword in text_content for keyword in all_keywords)
+    def matches(text: str) -> bool:
+        return any(re.search(r"(?<!\w)" + re.escape(keyword.lower()) + r"(?!\w)", text)
+                   for keyword in all_keywords)
+
+    # Broad media/AI words alone do not establish a software deliverable.
+    broad = {"ai", "video", "audio", "media", "streaming", "security", "vector", "container"}
+    strong_keywords = [kw for kw in all_keywords if kw.lower() not in broad]
+    def strong_matches(text):
+        return any(re.search(r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)", text)
+                   for kw in strong_keywords)
+
+    text_match = strong_matches(text_content)
+    if not text_match and matches(text_content):
+        text_match = bool(re.search(r"\b(implement|develop|integrate|build|debug)\b", text_content)
+                          and re.search(r"\b(software|application|workflow|model|chatbot|agent|pipeline|system)\b", text_content))
 
     # 如果文本匹配成功，直接返回
     if text_match:
@@ -57,8 +76,8 @@ def _check_skill_match(project_dict: Dict[str, Any]) -> bool:
     # 注意：Freelancer API返回的jobs可能是技能ID或技能名称
     if project_jobs:
         for job in project_jobs:
-            job_str = str(job).lower()
-            if any(keyword in job_str for keyword in all_keywords):
+            job_name = job.get('name', '') if isinstance(job, dict) else (job if isinstance(job, str) else '')
+            if strong_matches(job_name.lower()):
                 return True
 
     return False
@@ -95,6 +114,7 @@ def _pre_filter_projects(
         'filtered_skill': 0,
         'filtered_time': 0,
         'filtered_billing_type': 0,
+        'filtered_data': 0,
         'kept': 0
     }
 
@@ -102,7 +122,7 @@ def _pre_filter_projects(
         # 0.5 计费类型筛选（默认只保留 fixed 一次性项目）
         if fixed_price_only:
             project_type = str(project.get("type") or "").lower()
-            if project_type and project_type != "fixed":
+            if project_type != "fixed":
                 stats['filtered_billing_type'] += 1
                 logger.debug("Filtered by billing type: %s (type=%s)", project.get("title"), project_type)
                 continue
@@ -117,19 +137,23 @@ def _pre_filter_projects(
 
         # 1. 预算筛选
         if budget_min_threshold is not None:
-            budget_info = project.get('budget', {})
+            budget_info = project.get('budget') or {}
             budget_max = budget_info.get('maximum') or budget_info.get('minimum', 0)
-            currency_code = project.get('currency', {}).get('code', 'USD')
+            currency_code = (project.get('currency') or {}).get('code')
+            if not currency_code or not isinstance(budget_max, (int, float)) or not math.isfinite(budget_max) or budget_max <= 0:
+                stats['filtered_data'] += 1
+                continue
             
             # 使用动态汇率转换
             converter = get_currency_converter()
             currency_rate = converter.get_rate_sync(currency_code)
-            if currency_rate is None:
+            if currency_rate is None or not math.isfinite(currency_rate) or currency_rate <= 0:
                 logger.warning(
-                    "Currency rate missing for %s; skipping budget filter",
+                    "Currency rate missing for %s; deferring project until budget can be validated",
                     currency_code,
                 )
-                budget_usd = None
+                stats['filtered_data'] += 1
+                continue
             else:
                 budget_usd = budget_max * currency_rate
 
@@ -140,7 +164,8 @@ def _pre_filter_projects(
 
         # 2. 描述长度筛选
         if min_desc_length is not None:
-            description = project.get('preview_description') or project.get('description') or ''
+            description = (project.get('full_description') or project.get('description')
+                           or project.get('preview_description') or '')
             if len(description) < min_desc_length:
                 stats['filtered_desc'] += 1
                 logger.debug(f"Filtered by description length: {project.get('title')} (length: {len(description)} < {min_desc_length})")
@@ -148,7 +173,7 @@ def _pre_filter_projects(
 
         # 3. 状态筛选
         if allowed_statuses is not None:
-            status = project.get('status', '').lower()
+            status = str(project.get('status') or '').lower()
             if status not in [s.lower() for s in allowed_statuses]:
                 stats['filtered_status'] += 1
                 logger.debug(f"Filtered by status: {project.get('title')} (status: {status})")
@@ -169,10 +194,29 @@ def _pre_filter_projects(
     return filtered, stats
 
 
+def project_material_fields(project: Project) -> dict:
+    """Scope and pricing fields shared by score invalidation and bid approval."""
+    try:
+        skills = sorted(json.loads(project.skills or '[]'), key=str)
+    except (ValueError, TypeError):
+        skills = project.skills
+    return {
+        'id': project.freelancer_id, 'title': project.title,
+        'description': project.full_description or project.description or project.preview_description or '',
+        'budget_min': float(project.budget_minimum) if project.budget_minimum is not None else None,
+        'budget_max': float(project.budget_maximum) if project.budget_maximum is not None else None,
+        'currency': project.currency_code, 'type': project.type_id, 'skills': skills,
+        'owner_id': project.owner_id,
+    }
+
+
 def _apply_project_fields(project: Project, project_dict: Dict[str, Any]) -> None:
     """
     Apply mutable fields from API payload to local Project row.
     """
+    from services.scoring_policy import scoring_inputs
+    previous = project_material_fields(project)
+    previous_scoring = scoring_inputs(project)
     budget = project_dict.get("budget", {}) or {}
     currency = project_dict.get("currency", {}) or {}
 
@@ -181,6 +225,19 @@ def _apply_project_fields(project: Project, project_dict: Dict[str, Any]) -> Non
         "preview_description", project.preview_description
     )
     project.description = project_dict.get("description", project.description)
+    if project_dict.get("full_description"):
+        project.full_description = project_dict["full_description"]
+    elif project_dict.get("description"):
+        project.full_description = project_dict["description"]
+    jobs = project_dict.get("jobs")
+    if isinstance(jobs, list):
+        project.skills = json.dumps([
+            job.get("name") if isinstance(job, dict) else job
+            for job in jobs if not isinstance(job, dict) or job.get("name")
+        ], ensure_ascii=False)
+    for key in ("bid_stats", "owner_info"):
+        if isinstance(project_dict.get(key), dict):
+            setattr(project, key, json.dumps(project_dict[key], ensure_ascii=False))
     project.budget_minimum = budget.get("minimum", project.budget_minimum)
     project.budget_maximum = budget.get("maximum", project.budget_maximum)
     project.currency_code = currency.get("code", project.currency_code or "USD")
@@ -196,20 +253,60 @@ def _apply_project_fields(project: Project, project_dict: Dict[str, Any]) -> Non
         project.type_id = 1
     elif project_type == "hourly":
         project.type_id = 2
-    project.owner_id = project_dict.get("owner_id", project.owner_id)
+    owner = project_dict.get("owner")
+    owner_id = owner.get("id") if isinstance(owner, dict) else owner
+    project.owner_id = project_dict.get("owner_id") or owner_id or project.owner_id
     submitdate = project_dict.get("submitdate")
     if submitdate is not None:
         project.submitdate = str(submitdate)
+    if previous != project_material_fields(project):
+        # Changed requirements must return to scoring, never retain an old quote.
+        for field in ('ai_score', 'ai_reason', 'ai_proposal_draft', 'suggested_bid',
+                      'estimated_hours', 'hourly_rate'):
+            setattr(project, field, None)
+    if previous_scoring != scoring_inputs(project):
+        project.ai_score = None
+        project.ai_reason = None
+        project.score_metadata = None
+        project.scored_at = None
+    from sqlalchemy.orm import object_session
+    session = object_session(project)
+    if session is not None:
+        from services import workflow_service as workflow
+        from database.models import CandidateWorkflow
+        row = session.query(CandidateWorkflow).filter_by(project_freelancer_id=project.freelancer_id).first()
+        if row is not None:
+            row = workflow.ensure(session, project)
+            if row.state == "ready" and project.ai_score is None:
+                workflow.transition(session, row, "needs_evaluation", "score_stale", "项目资料已变化，等待重新评估")
     project.updated_at = datetime.utcnow()
+
+
+def publication_timestamp():
+    numeric = cast(Project.submitdate, Float)
+    return case(
+        (numeric > 10_000_000_000, numeric / 1000),
+        (numeric > 1_000_000_000, numeric),
+        else_=cast(func.strftime("%s", Project.submitdate), Float),
+    )
+
+
+def published_since(cutoff: datetime):
+    """Filter actual publication time (seconds, milliseconds or ISO), never ingestion time."""
+    timestamp = publication_timestamp()
+    cutoff_utc = cutoff.replace(tzinfo=timezone.utc) if cutoff.tzinfo is None else cutoff
+    return timestamp >= cutoff_utc.timestamp()
 
 
 def _parse_submit_timestamp(raw_submitdate: Any) -> Optional[int]:
     """Parse project submitdate from multiple possible formats into unix timestamp(seconds)."""
-    if raw_submitdate is None:
+    if raw_submitdate is None or isinstance(raw_submitdate, bool):
         return None
 
     # int/float unix timestamp
     if isinstance(raw_submitdate, (int, float)):
+        if not math.isfinite(raw_submitdate):
+            return None
         ts = int(raw_submitdate)
         if ts > 10_000_000_000:  # milliseconds
             ts //= 1000
@@ -229,6 +326,8 @@ def _parse_submit_timestamp(raw_submitdate: Any) -> Optional[int]:
     # ISO datetime fallback
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
         return int(parsed.timestamp())
     except Exception:
         return None
@@ -264,8 +363,9 @@ async def search_projects(
     normalized_allowed_statuses = [s.lower() for s in (allowed_statuses or settings.ALLOWED_STATUSES)]
     min_submit_ts = None
     if since_days is not None and since_days > 0:
-        min_submit_ts = int((datetime.utcnow() - timedelta(days=since_days)).timestamp())
+        min_submit_ts = int((datetime.now(timezone.utc) - timedelta(days=since_days)).timestamp())
     
+    synced_ids = None
     # 1. 如果明确要求同步，先执行抓取同步逻辑
     if sync_from_api:
         if _sync_lock.locked():
@@ -289,8 +389,9 @@ async def search_projects(
                     offset=0
                 )
 
+                synced_ids = []
                 if p_data:
-                    filtered_projects, _ = _pre_filter_projects(
+                    filtered_projects, filter_stats = _pre_filter_projects(
                         projects_data=p_data,
                         budget_min_threshold=settings.MIN_BUDGET_THRESHOLD,
                         min_desc_length=settings.MIN_DESCRIPTION_LENGTH,
@@ -301,9 +402,16 @@ async def search_projects(
                     )
 
                     with get_db_session() as background_db:
+                        from services import workflow_service as workflow
+                        workflow.event(background_db, "fetch", "observed", count=len(p_data))
+                        for reason, count in filter_stats.items():
+                            if reason.startswith("filtered_") and count:
+                                workflow.event(background_db, "filter", "excluded", reason=reason, count=count)
+                        workflow.event(background_db, "filter", "kept", count=filter_stats["kept"])
                         for project_dict in filtered_projects:
                             pid = project_dict.get('id')
                             if not pid: continue
+                            synced_ids.append(pid)
 
                             existing = background_db.query(Project).filter_by(freelancer_id=pid).first()
                             if existing:
@@ -315,16 +423,27 @@ async def search_projects(
                                 )
                                 _apply_project_fields(new_proj, project_dict)
                                 background_db.add(new_proj)
+                                existing = new_proj
+                            background_db.flush()
+                            workflow.ensure(background_db, existing)
+                        background_db.commit()
+                else:
+                    from services import workflow_service as workflow
+                    with get_db_session() as background_db:
+                        workflow.event(background_db, "fetch", "observed", count=0)
                         background_db.commit()
                 logger.info(f"Background sync completed successfully for query: {query}")
             except Exception as e:
                 logger.error(f"Background sync failed: {e}")
+                raise
             finally:
                 _is_syncing = False
                 logger.info("Background sync lock released")
 
     # 2. 构建本地数据库查询
     db_query = db.query(Project)
+    if synced_ids is not None:
+        db_query = db_query.filter(Project.freelancer_id.in_(synced_ids))
 
     if query:
         db_query = db_query.filter(or_(
@@ -342,7 +461,7 @@ async def search_projects(
 
     if min_submit_ts is not None:
         cutoff_dt = datetime.utcfromtimestamp(min_submit_ts)
-        db_query = db_query.filter(Project.created_at >= cutoff_dt)
+        db_query = db_query.filter(published_since(cutoff_dt))
     
     if min_score is not None and min_score > 0:
         db_query = db_query.filter(Project.ai_score >= min_score)
@@ -373,7 +492,7 @@ async def get_project_details(db: Session, project_id: int) -> Dict[str, Any]:
     client = get_freelancer_client()
 
     # Use full_description and user_details parameters
-    project_details = create_get_projects_project_details_object(full_description=True)
+    project_details = create_get_projects_project_details_object(full_description=True, jobs=True)
     user_details = create_get_projects_user_details_object(
         basic=True,
         reputation=True,
@@ -388,36 +507,10 @@ async def get_project_details(db: Session, project_id: int) -> Dict[str, Any]:
 
     project = db.query(Project).filter_by(freelancer_id=project_id).first()
 
-    if project:
-        # Update existing record
-        project.title = project_data.get('title', project.title)
-        project.description = project_data.get('description', project.description)
-        project.status = project_data.get('status', project.status)
-        project.updated_at = datetime.utcnow()
-
-        if 'full_description' in project_data:
-            project.full_description = project_data['full_description']
-    else:
-        # Create new record
-        project = Project(
-            freelancer_id=project_id,
-            title=project_data.get('title', ''),
-            description=project_data.get('description'),
-            preview_description=project_data.get('preview_description'),
-            budget_minimum=project_data.get('budget', {}).get('minimum'),
-            budget_maximum=project_data.get('budget', {}).get('maximum'),
-            currency_code=project_data.get('currency', {}).get('code', 'USD'),
-            submitdate=project_data.get('submitdate'),
-            status=project_data.get('status', 'open'),
-            type_id=project_data.get('type_id'),
-            owner_id=project_data.get('owner_id'),
-            country=project_data.get('country', {}).get('name')
-        )
-
-        if 'full_description' in project_data:
-            project.full_description = project_data['full_description']
-
+    if project is None:
+        project = Project(freelancer_id=project_id)
         db.add(project)
+    _apply_project_fields(project, project_data)
 
     db.commit()
     db.refresh(project)
@@ -439,7 +532,8 @@ def update_project_ai_analysis(
 
     estimated_hours: Optional[int] = None,
 
-    hourly_rate: Optional[float] = None
+    hourly_rate: Optional[float] = None,
+    score_metadata: Optional[Dict[str, Any]] = None
 
 ) -> Optional[Dict[str, Any]]:
 
@@ -468,11 +562,17 @@ def update_project_ai_analysis(
     project.estimated_hours = estimated_hours
 
     project.hourly_rate = hourly_rate
+    metadata = score_metadata or {"source": "manual", "total": ai_score}
+    project.score_metadata = json.dumps(metadata, ensure_ascii=False, allow_nan=False)
+    project.scored_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     project.updated_at = datetime.utcnow()
 
 
 
+    if metadata.get("source") == "llm":
+        from services import workflow_service as workflow
+        workflow.apply_score(db, project)
     db.commit()
 
     db.refresh(project)

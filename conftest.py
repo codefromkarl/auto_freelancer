@@ -9,12 +9,16 @@ _runtime = Path(__file__).resolve().parent / ".runtime"
 _runtime.mkdir(exist_ok=True)
 _state = TemporaryDirectory(prefix="tests-", dir=_runtime)
 os.environ.update(
+    BID_SUBMISSION_ENABLED='false', BID_MAX_DAILY_ATTEMPTS='1',
     FREELANCER_OAUTH_TOKEN="test-token", FREELANCER_USER_ID="999",
     PYTHON_API_KEY="test-api-key",
     DATABASE_PATH=str(Path(_state.name) / "test.db"),
     LOG_FILE=str(Path(_state.name) / "test.log"),
     OPENAI_API_KEY="test-key", OPENAI_ENABLED="false", ZHIPU_ENABLED="false",
     ANTHROPIC_ENABLED="false", DEEPSEEK_ENABLED="false", LLM_API_KEY="test-key",
+    QQ_BOT_APP_ID="test-app", QQ_BOT_APP_SECRET="test-qq-secret",
+    QQ_BOT_TARGET_TYPE="c2c", QQ_BOT_TARGET_ID="test-user",
+    QQ_BOT_APPROVER_OPENIDS="test-user", QQ_BOT_STATE_PATH=str(Path(_state.name) / "qqbot.db"),
 )
 
 

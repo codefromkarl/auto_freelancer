@@ -368,25 +368,12 @@ class ScoringCache:
         Returns:
             缓存键
         """
-        # Include description hash to invalidate cache when description changes
-        description = str(project_data.get("description", "") or "")
-        desc_hash = hashlib.md5(description.encode()).hexdigest()[:8]
-
-        # 提取关键特征
-        key_features = {
-            "id": project_data.get("id"),
-            "title": project_data.get("title", "")[:100],  # 截断长标题
-            "budget_min": project_data.get("budget_minimum"),
-            "budget_max": project_data.get("budget_maximum"),
-            "currency": project_data.get("currency_code"),
-            "desc_hash": desc_hash,
-        }
-
-        if weights:
-            key_features["weights"] = weights
+        # Every scoring input participates, including dynamic customer/competition/age
+        # and provider identity supplied by the scoring service.
+        key_features = {"payload": project_data, "weights": weights}
 
         # 生成哈希
-        features_str = json.dumps(key_features, sort_keys=True)
+        features_str = json.dumps(key_features, sort_keys=True, allow_nan=False, default=str)
         key_hash = hashlib.md5(features_str.encode()).hexdigest()[:16]
 
         return f"{prefix}:{key_hash}"

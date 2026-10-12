@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from database.connection import get_db
 from services import project_service
-from services.project_scorer import get_project_scorer
+from services.llm_scoring_service import get_scoring_service
 from services.freelancer_client import FreelancerAPIError
 
 router = APIRouter()
@@ -176,33 +176,22 @@ async def score_project_with_ai(project_id: int, db: Session = Depends(get_db)):
         project = db.query(Project).filter_by(freelancer_id=project_id).first()
         if not project:
             # 尝试从 API 抓取详情并入库
-            project_dict = await project_service.get_project_details(db, project_id)
-        else:
-            project_dict = project.to_dict()
+            await project_service.get_project_details(db, project_id)
 
-        # 2. 调用评分服务
-        scorer = get_project_scorer()
-        # 确保评分所需的权重已加载
-        scorer.fetch_weights_from_db(db)
-
-        # 3. 执行 AI 分析
-        score_result = scorer.score_project(project_dict)
-
-        # 4. 更新数据库
-        updated_data = project_service.update_project_ai_analysis(
-            db,
-            project_id,
-            score_result.ai_score,
-            score_result.ai_reason,
-            score_result.ai_proposal_draft,
-            suggested_bid=None,
-            estimated_hours=score_result.score_breakdown.estimated_hours,
-            hourly_rate=score_result.score_breakdown.hourly_rate,
-        )
+        project = db.query(Project).filter_by(freelancer_id=project_id).first()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        service = get_scoring_service()
+        total, errors, _, _ = await service.score_projects_concurrent([project], db, max_retries=0)
+        if errors or total != 1:
+            raise HTTPException(status_code=422, detail="模型评分未通过结构化校验，原评分不能作为本次结果")
+        updated_data = project.to_dict()
 
         return APIResponse(status="success", data=updated_data)
     except FreelancerAPIError as e:
         raise HTTPException(status_code=e.status_code or 500, detail=e.message)
+    except HTTPException:
+        raise
     except Exception as e:
         import logging
         logging.error(f"Scoring error: {str(e)}")

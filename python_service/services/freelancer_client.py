@@ -363,7 +363,9 @@ class FreelancerClient:
                             search_filter=search_filter,
                             limit=limit,
                             offset=offset,
-                            active_only=active_only
+                            active_only=active_only,
+                            project_details={"full_description": True, "job_details": True},
+                            user_details={"user_details": True, "user_employer_reputation": True},
                         )
                     ),
                     timeout=60.0,
@@ -376,7 +378,7 @@ class FreelancerClient:
 
             # result is usually a dictionary with 'projects', 'users', etc.
             if isinstance(result, dict):
-                projects = result.get('projects', [])
+                projects = [self._enrich_project(item, result.get('users')) for item in result.get('projects', [])]
                 if newest_first:
                     projects = self._sort_projects_by_submitdate_desc(projects)
                 return projects
@@ -388,6 +390,26 @@ class FreelancerClient:
                 message=f"Failed to search projects: {str(e)}",
                 status_code=500
             )
+
+    @staticmethod
+    def _enrich_project(project: Dict[str, Any], users: Any = None) -> Dict[str, Any]:
+        """Attach owner data from SDK envelopes without inventing unknown reputation."""
+        payload = dict(project)
+        owner = payload.get("owner")
+        owner_id = payload.get("owner_id") or (owner.get("id") if isinstance(owner, dict) else owner)
+        if owner_id:
+            payload["owner_id"] = owner_id
+        if isinstance(owner, dict):
+            payload["owner_info"] = owner
+        elif isinstance(users, dict):
+            user = users.get(str(owner_id)) or users.get(owner_id)
+            if isinstance(user, dict):
+                payload["owner_info"] = user
+        elif isinstance(users, list):
+            user = next((u for u in users if isinstance(u, dict) and u.get("id") == owner_id), None)
+            if user:
+                payload["owner_info"] = user
+        return payload
 
     @staticmethod
     def _parse_submitdate_to_ts(raw_submitdate: Any) -> int:
@@ -471,7 +493,9 @@ class FreelancerClient:
                     status_code=504,
                 )
 
-            return project
+            if isinstance(project, dict) and isinstance(project.get("project"), dict):
+                return self._enrich_project(project["project"], project.get("users"))
+            return self._enrich_project(project)
         except Exception as e:
             logger.error(f"Failed to get project {project_id}: {e}")
             raise FreelancerAPIError(
@@ -956,6 +980,7 @@ class FreelancerClient:
         limit: int = 50,
         offset: int = 0,
         auto_paginate: bool = True,
+        max_pages: int = 8,
     ) -> List[Dict[str, Any]]:
         """
         Fetch competitor bids for a project.
@@ -971,8 +996,11 @@ class FreelancerClient:
         Returns:
             List of bid dicts from the API
         """
+        if not 1 <= limit <= 50 or offset < 0 or not 1 <= max_pages <= 20:
+            raise ValueError('Invalid bounded bid pagination parameters')
         all_bids: List[Dict[str, Any]] = []
         current_offset = offset
+        pages = 0
 
         headers = {
             "Freelancer-OAuth-V1": settings.FREELANCER_OAUTH_TOKEN,
@@ -1040,8 +1068,9 @@ class FreelancerClient:
                 break
 
             all_bids.extend(bids)
+            pages += 1
 
-            if not auto_paginate or len(bids) < limit:
+            if not auto_paginate or len(bids) < limit or pages >= max_pages:
                 break
 
             current_offset += limit

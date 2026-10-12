@@ -40,7 +40,7 @@ class TestProposalPromptBuilder:
 
     def test_build_prompt(self, builder, sample_project):
         prompt = builder.build_prompt(sample_project, style="narrative", structure="three_step")
-        assert "senior freelance developer" in prompt
+        assert "verified facts" in prompt
         assert "风格要求：叙事化表达" in prompt
         assert "结构要求：三段式提案" in prompt
 

@@ -16,6 +16,8 @@ or `reset_singleton()` to clear cached state.
 
 import logging
 import time
+import re
+import math
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -284,7 +286,7 @@ class ProjectScorer:
         rules = settings.scoring_rules
         self.config = config
         self.weights = (
-            config.weights if config else rules.get("weights", DEFAULT_WEIGHTS.copy())
+            dict(config.weights) if config else dict(rules.get("weights", DEFAULT_WEIGHTS))
         )
         self.user_skills = config.user_skills if config else settings.DEFAULT_SKILLS
         self.min_hours = config.min_hours if config else ProjectComplexity.TRIVIAL.value[0]
@@ -306,7 +308,7 @@ class ProjectScorer:
         from database.models import ScoringRule
         rules = db.query(ScoringRule).filter(ScoringRule.is_active == True).all()
         if rules:
-            new_weights = {rule.name: rule.weight for rule in rules}
+            new_weights = {("tech" if rule.name == "tech_match" else rule.name): rule.weight for rule in rules}
             # Only update weights that exist in our default weights to avoid unknown dimensions
             for name, weight in new_weights.items():
                 if name in self.weights:
@@ -402,59 +404,42 @@ class ProjectScorer:
             Estimated hours (clamped to min/max configured)
         """
         hours = 0
-        title = project.get("title", "").lower()
-        description = (project.get("full_description") or "").lower()
-        combined_text = f"{title} {description}"
+        title = (project.get("title") or "").lower()
+        description = (project.get("full_description") or project.get("description") or "").lower()
+        text = f"{title} {description}"
+        def contains(words, content=text):
+            return any(re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", content) for word in words)
 
-        # 1. Base hours from platform/type
-        if any(kw in title for kw in ["mobile", "app", "ios", "android"]):
+        if contains(["mobile", "app", "ios", "android"], title):
             hours += 80
-        elif any(kw in combined_text for kw in ["mobile", "app", "ios", "android"]):
+        elif contains(["mobile", "app", "ios", "android"]):
             hours += 40
-
-        if "website" in title or "full stack" in title:
-            hours += 40
-        elif "web" in combined_text:
+        if contains(["website", "full stack", "full-stack", "platform"], title):
+            hours += 80
+        elif contains(["web", "website"]):
             hours += 20
-
-        if "api" in title or "integration" in title:
+        if contains(["api", "integration"], title):
             hours += 20
-        if "scraping" in title or "scraper" in title:
+        if contains(["scraping", "scraper"], title):
             hours += 15
-        if "automation" in title or "bot" in title:
+        if contains(["automation", "bot"], title):
             hours += 20
-
-        # 2. AI/ML/Agent complexity
-        if "multimodal" in combined_text or "agent" in combined_text:
+        if contains(["multimodal", "agent", "agents", "multi-agent"]):
             hours += 40
-        elif any(
-            kw in combined_text
-            for kw in [
-                "machine learning",
-                "ml ",
-                "deep learning",
-                "neural network",
-                "nlp",
-                "llm",
-                "ai ",
-                "artificial intelligence",
-            ]
-        ):
+        elif contains(["machine learning", "ml", "deep learning", "neural network", "nlp", "llm", "ai", "artificial intelligence"]):
             hours += 30
-
-        # 3. Integration complexity (workflow/orchestration tools)
-        if any(kw in combined_text for kw in ["workflow", "zapier", "make", "airflow"]):
+        if contains(["workflow", "zapier", "make.com", "airflow"]):
             hours += 15
 
-        small_task_keywords = ["fix", "bug", "small", "tweak", "script", "update"]
-        small_hits = sum(1 for kw in small_task_keywords if kw in combined_text)
-        if small_hits:
-            multiplier = 0.3
-            if small_hits >= 2:
-                multiplier = 0.2
-            if small_hits >= 3:
-                multiplier = 0.1
-            hours = hours * multiplier
+        # Only an explicitly bounded repair title can narrow an estimate. Incidental
+        # 'script/update/bug' words in a platform specification never shrink its scope.
+        repair = bool(re.match(r"^(fix|repair|debug|bug fix)\b", title))
+        broad_scope = contains(["platform", "full stack", "full-stack", "multi-agent",
+                                "production-ready", "operating system", "erp"])
+        if repair and not broad_scope:
+            hours = min(hours or 10, 20)
+        if broad_scope:
+            hours = max(hours, 80)
 
         min_hours = max(self.min_hours, ProjectComplexity.TRIVIAL.value[0])
         max_hours = min(self.max_hours, ProjectComplexity.LARGE.value[1])
@@ -489,7 +474,7 @@ class ProjectScorer:
             return 5.0, 0.0
         project_type = project.get("type", project.get("type_id", "fixed"))
 
-        if project_type == "hourly":
+        if project_type in ("hourly", 2):
             hourly_rate = avg_budget_usd
         else:
             if estimated_hours <= 0:
@@ -500,19 +485,11 @@ class ProjectScorer:
             f"Project {project_id}: Normalized hourly rate {hourly_rate:.2f} USD/h"
         )
 
-        score = 0.0
-        if hourly_rate >= 80:
-            score = max(4.0, 6.0 - (hourly_rate - 80) / 40 * 2.0)
-        elif hourly_rate >= 60:
-            score = 6.0 + (80 - hourly_rate) / 20 * 2.0
-        elif hourly_rate >= 20:
-            score = 8.0 + (hourly_rate - 20) / 40 * 2.0
-        elif hourly_rate >= 15:
-            score = 6.0 + (hourly_rate - 15) / 5 * 2.0
-        else:
-            score = max(0.0, hourly_rate / 15 * 6.0)
-
-        return score, hourly_rate
+        from services.scoring_policy import economic_score
+        quote = avg_budget_usd
+        fee = max(quote * 0.1, 5) if project_type not in ("hourly", 2) else quote * 0.1
+        net_hourly = (quote - fee) / estimated_hours if project_type not in ("hourly", 2) else quote - fee
+        return economic_score(net_hourly), hourly_rate
 
     def score_requirement_quality(self, project: Dict[str, Any]) -> float:
         """
@@ -527,89 +504,15 @@ class ProjectScorer:
         scorer = RequirementQualityScorer(config=settings.scoring_rules)
         return scorer.score(description)
 
-    def score_competition(self, project: Dict[str, Any], competition_analysis: Optional[Dict[str, Any]] = None) -> float:
-        """
-        Score competition level (0-10 points).
-
-        When *competition_analysis* (from competitor_bid_service.analyze_competition)
-        is provided, scoring uses real bid data for higher accuracy.
-        Otherwise falls back to the bid_count heuristic (backward-compatible).
-
-        评分逻辑（有竞争投标数据时）：
-        - active_bids 0-4: 得分 2.0（太少投标 = 项目可能有问题）
-        - active_bids 5-15: 得分 10.0（健康竞争）
-        - active_bids 16-30: 得分 7.0（中等竞争）
-        - active_bids 31-50: 得分 4.0（激烈竞争）
-        - active_bids > 50: 得分 2.0（过度竞争）
-        """
+    def score_competition(self, project, competition_analysis=None):
+        from services.scoring_policy import competition_score
+        from services.project_service import _parse_submit_timestamp
+        submitted = _parse_submit_timestamp(project.get("submitdate"))
+        age = max(0, time.time() - submitted) / 3600 if submitted else None
+        stats = project.get("bid_stats")
         if competition_analysis and competition_analysis.get("active_bids") is not None:
-            return self._score_competition_from_analysis(competition_analysis, project)
-
-        # Fallback: bid_count heuristic
-        return self._score_competition_from_bid_count(project)
-
-    def _score_competition_from_analysis(
-        self,
-        analysis: Dict[str, Any],
-        project: Dict[str, Any],
-    ) -> float:
-        """Score competition using real competitor bid data."""
-        active = analysis.get("active_bids", 0)
-
-        if active <= 4:
-            score = 2.0
-        elif active <= 15:
-            score = 10.0
-        elif active <= 30:
-            score = 7.0
-        elif active <= 50:
-            score = 4.0
-        else:
-            score = 2.0
-
-        # Bonus: few top-reputation bidders = less threat
-        rep_info = analysis.get("reputation", {})
-        top_bidders = rep_info.get("top_bidders", 0)
-        if top_bidders == 0 and active > 0:
-            score = min(10.0, score + 1.0)
-        elif top_bidders >= 5:
-            score = max(0.0, score - 1.0)
-
-        # Recency bonus (same as fallback)
-        score = self._apply_recency_bonus(score, project)
-        return score
-
-    def _score_competition_from_bid_count(self, project: Dict[str, Any]) -> float:
-        """Original bid_count-based competition scoring (backward-compatible)."""
-        bid_stats = project.get("bid_stats") or {}
-        bid_count = bid_stats.get("bid_count", 0)
-
-        if bid_count <= 4:
-            score = 2.0
-        elif bid_count <= 20:
-            score = 10.0
-        elif bid_count <= 40:
-            score = 6.0
-        else:
-            score = 2.0
-
-        score = self._apply_recency_bonus(score, project)
-        return score
-
-    @staticmethod
-    def _apply_recency_bonus(score: float, project: Dict[str, Any]) -> float:
-        """Add +1 bonus if project was submitted within 24 hours."""
-        submitdate = project.get("submitdate")
-        if submitdate:
-            try:
-                submit_ts = float(submitdate)
-                if submit_ts > 1_000_000_000_000:
-                    submit_ts = submit_ts / 1000.0
-                if time.time() - submit_ts <= 24 * 3600:
-                    score = min(10.0, score + 1.0)
-            except (TypeError, ValueError):
-                pass
-        return score
+            stats = {"bid_count": competition_analysis["active_bids"]}
+        return competition_score(stats, age)
 
     def detect_risk_keywords(self, project: Dict[str, Any]) -> Dict[str, List[str]]:
         """
@@ -682,7 +585,7 @@ class ProjectScorer:
         ).lower()
         matched_skills = 0
         for skill in self.user_skills:
-            if skill.lower() in title or skill.lower() in description:
+            if re.search(r"(?<!\w)" + re.escape(skill.lower()) + r"(?!\w)", f"{title} {description}"):
                 matched_skills += 1
         if matched_skills >= 3:
             return 10.0
@@ -696,7 +599,7 @@ class ProjectScorer:
         """
         Score project risk (0-10 points, higher = less risky).
         """
-        score = 7.0
+        score = 5.0
         owner_info = project.get("owner_info")
         if owner_info:
             if owner_info.get("verified"):
@@ -782,7 +685,11 @@ class ProjectScorer:
 
         # Use weights from settings.scoring_rules or defaults
         rules = settings.scoring_rules
-        weights = rules.get("weights", self.weights)
+        weights = dict(self.weights)
+        weight_sum = sum(weights.values())
+        if not math.isfinite(weight_sum) or weight_sum <= 0 or any(not math.isfinite(w) or w < 0 for w in weights.values()):
+            raise ValueError("Scoring weights must be finite, nonnegative and have a positive total")
+        weights = {key: weight / weight_sum for key, weight in weights.items()}
 
         # 使用配置中的权重计算总分
         total = 0.0

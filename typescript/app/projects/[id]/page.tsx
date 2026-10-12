@@ -1,7 +1,8 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getProject, scoreProject, createBid } from '@/lib/api';
+import { getProject, scoreProject, createBid, prepareBid, getBidApproval } from '@/lib/api';
+import type { BidApproval } from '@/lib/types';
 import { useParams } from 'next/navigation';
 import {
   ArrowLeft,
@@ -41,11 +42,24 @@ export default function ProjectDetailPage() {
   const [isBidding, setIsBidding] = useState(false);
   const [bidAmount, setBidAmount] = useState<number>(0);
   const [bidPeriod, setBidPeriod] = useState<number>(7);
-
+  const [prepared, setPrepared] = useState<BidApproval | null>(null);
+  const { data: approval } = useQuery({
+    queryKey: ['approval', prepared?.id],
+    queryFn: () => getBidApproval(prepared!.id),
+    enabled: !!prepared,
+    refetchInterval: prepared ? 3000 : false,
+  });
+  const currentApproval = approval || prepared;
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => getProject(projectId),
     enabled: !!projectId,
+  });
+
+  const prepareMutation = useMutation({
+    mutationFn: () => prepareBid(projectId, bidAmount, bidPeriod, project?.currency_code || 'USD'),
+    onSuccess: setPrepared,
+    onError: (err) => alert('预览准备失败: ' + err),
   });
 
   const scoreMutation = useMutation({
@@ -65,6 +79,7 @@ export default function ProjectDetailPage() {
         amount: data.amount,
         period: data.period,
         amount_currency: project?.currency_code,
+        approval_id: currentApproval?.id,
       }),
     onSuccess: () => {
       setIsBidding(false);
@@ -233,7 +248,10 @@ export default function ProjectDetailPage() {
                     <Input
                       type="number"
                       value={bidAmount}
-                      onChange={(e) => setBidAmount(parseFloat(e.target.value))}
+                      onChange={(e) => {
+                        setBidAmount(parseFloat(e.target.value));
+                        setPrepared(null);
+                      }}
                       className="bg-white h-8"
                     />
                   </div>
@@ -244,7 +262,10 @@ export default function ProjectDetailPage() {
                     <Input
                       type="number"
                       value={bidPeriod}
-                      onChange={(e) => setBidPeriod(parseInt(e.target.value))}
+                      onChange={(e) => {
+                        setBidPeriod(parseInt(e.target.value));
+                        setPrepared(null);
+                      }}
                       className="bg-white h-8"
                     />
                   </div>
@@ -260,12 +281,72 @@ export default function ProjectDetailPage() {
                     <Button
                       size="sm"
                       className="flex-1 h-8 bg-blue-600 hover:bg-blue-700 text-white"
-                      onClick={() => bidMutation.mutate({ amount: bidAmount, period: bidPeriod })}
-                      disabled={bidMutation.isPending}
+                      onClick={() =>
+                        prepared
+                          ? bidMutation.mutate({ amount: bidAmount, period: bidPeriod })
+                          : prepareMutation.mutate()
+                      }
+                      disabled={
+                        prepareMutation.isPending ||
+                        bidMutation.isPending ||
+                        (!!prepared &&
+                          (currentApproval?.state !== 'approved' ||
+                            !currentApproval?.submission_enabled))
+                      }
                     >
-                      {bidMutation.isPending ? '提交中...' : '确认提交'}
+                      {prepareMutation.isPending
+                        ? '生成预览...'
+                        : bidMutation.isPending
+                          ? '提交中...'
+                          : prepared
+                            ? '提交已批准内容'
+                            : '生成最终预览'}
                     </Button>
                   </div>
+                  {prepared && (
+                    <div className="space-y-2 text-sm">
+                      <p>QQ 审批状态：{currentApproval?.state}</p>
+                      {!currentApproval?.submission_enabled && <p>真实投标尚未开启。</p>}
+                      <pre className="whitespace-pre-wrap max-h-80 overflow-auto">
+                        {prepared.payload.description}
+                      </pre>
+                      <p>
+                        报价 {prepared.payload.amount} {prepared.payload.currency}，工期{' '}
+                        {prepared.payload.period} 天。
+                      </p>
+                      <p>复核事项：{prepared.payload.review_notes.join('；')}</p>
+                      {prepared.payload.competition_review && (
+                        <div className="space-y-1 rounded border p-2">
+                          <p>
+                            竞标对比：{prepared.payload.competition_review.benchmark.visible_count}{' '}
+                            份公开标书
+                          </p>
+                          <p>
+                            公开报价中位数：
+                            {prepared.payload.competition_review.benchmark.price.median ??
+                              '未知'}{' '}
+                            {prepared.payload.competition_review.benchmark.currency}
+                            {prepared.payload.competition_review.premium_pct != null &&
+                              `；本稿相对中位数 ${prepared.payload.competition_review.premium_pct > 0 ? '+' : ''}${prepared.payload.competition_review.premium_pct}%`}
+                          </p>
+                          {prepared.payload.competition_review.findings.map((finding) => (
+                            <p key={finding}>{finding}</p>
+                          ))}
+                          <p className="text-muted-foreground">
+                            标价与履历描述需核实；对比结果不代表中标概率。
+                          </p>
+                        </div>
+                      )}
+                      {['expired', 'rejected', 'blocked'].includes(
+                        currentApproval?.state || ''
+                      ) && (
+                        <Button variant="outline" size="sm" onClick={() => setPrepared(null)}>
+                          重新准备候选
+                        </Button>
+                      )}
+                      <p>请在 QQ 对机器人发送“候选”，核对完整内容后批准。</p>
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>

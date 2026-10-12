@@ -251,334 +251,43 @@ def _align_proposal_with_amount(proposal: str, amount: float, currency: str) -> 
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Submit a bid for a project.")
-    parser.add_argument("--project-id", type=int, help="Freelancer project ID")
-    parser.add_argument("--amount", type=float, help="Bid amount")
-    parser.add_argument("--period", type=int, default=7, help="Delivery period in days")
-    parser.add_argument("--proposal", type=str, help="Manual proposal text (requires --allow-manual-proposal)")
-    parser.add_argument(
-        "--allow-manual-proposal",
-        action="store_true",
-        help="Allow manual proposal and bypass automatic proposal generation (not recommended)",
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Preview without submitting")
-    parser.add_argument(
-        "--keep-proxy",
-        action="store_true",
-        help="Keep proxy env vars (default: unset for better SDK/LLM compatibility)",
-    )
-    parser.add_argument(
-        "--allowed-statuses",
-        default=",".join(common.DEFAULT_BIDDABLE_STATUSES),
-        help="Comma-separated allowed statuses for bidding",
-    )
-    parser.add_argument(
-        "--preview-archive-dir",
-        default="logs/bid_previews",
-        help="Directory to archive bid preview markdown files",
-    )
-    parser.add_argument(
-        "--no-save-preview",
-        action="store_true",
-        help="Do not save preview content to archive files",
-    )
-    parser.add_argument("--lock-file", default=str(common.DEFAULT_LOCK_FILE), help="Lock file path")
+    parser = argparse.ArgumentParser(description="Prepare QQ approval snapshot or submit an already-approved snapshot")
+    parser.add_argument('--project-id', type=int)
+    parser.add_argument('--amount', type=float)
+    parser.add_argument('--amount-currency')
+    parser.add_argument('--period', type=int, default=7)
+    parser.add_argument('--proposal')
+    parser.add_argument('--approval-id')
+    parser.add_argument('--submit', action='store_true')
+    parser.add_argument('--dry-run', action='store_true', help='Prepare only; never submit')
     args = parser.parse_args(argv)
-
-    logger = common.setup_logging("manual_bid")
-
-    with common.file_lock(Path(args.lock_file), blocking=False) as acquired:
-        if not acquired:
-            print("Lock busy. Another workflow may be running.")
-            return common.EXIT_LOCK_ERROR
-
-        try:
-            common.load_env()
-            common.get_settings()
-            if not args.keep_proxy:
-                for key in PROXY_ENV_KEYS:
-                    os.environ.pop(key, None)
-        except Exception as exc:
-            print(f"Failed to load settings: {exc}")
-            return common.EXIT_VALIDATION_ERROR
-
-        project_id = args.project_id
-        if project_id is None:
-            raw = input("Project ID: ").strip()
-            if not raw:
-                print("Missing project ID.")
-                return common.EXIT_VALIDATION_ERROR
-            try:
-                project_id = int(raw)
-            except ValueError:
-                print("Invalid project ID.")
-                return common.EXIT_VALIDATION_ERROR
-
+    from services.approved_bids import prepare_bid, submit_approved_bid
+    from services.qqbot_service import QQBotConfig, QQBotClient
+    from services.qqbot_store import QQBotStore
+    from services.qqbot_events import notify_snapshot, preview_text
+    try:
+        common.get_settings()
+        config = QQBotConfig.from_env()
+        store = QQBotStore(config.state_path)
         with common.get_db_context() as db:
-            project = db.query(Project).filter(Project.freelancer_id == project_id).first()
-            if not project:
-                print(f"Project {project_id} not found in DB.")
-                return common.EXIT_VALIDATION_ERROR
-
-            existing_bid = (
-                db.query(Bid)
-                .filter(Bid.project_freelancer_id == project_id)
-                .filter(Bid.status != "withdrawn")
-                .first()
-            )
-            if existing_bid is not None:
-                print(
-                    f"Project {project_id} already has local bid record "
-                    f"(bid_id={getattr(existing_bid, 'freelancer_bid_id', 'unknown')}, "
-                    f"status={getattr(existing_bid, 'status', 'unknown')})."
-                )
-                return common.EXIT_VALIDATION_ERROR
-
-            if project.status == "bid_submitted":
-                print(f"Project {project_id} already marked as bid_submitted; reconcile before retrying.")
-                return common.EXIT_VALIDATION_ERROR
-
-            # 实时校验远端项目状态，避免对已冻结/关闭项目继续预览或投标
-            try:
-                is_biddable_now, reason = asyncio.run(
-                    bid_service.validate_project_biddable_now(db, project)
-                )
-            except Exception as exc:
-                print(f"Failed to validate remote project status: {exc}")
-                return common.EXIT_API_ERROR
-
-            if not is_biddable_now:
-                print(f"Project {project_id} is not biddable now: {reason}")
-                return common.EXIT_VALIDATION_ERROR
-
-            allowed_statuses = common.parse_statuses(
-                args.allowed_statuses,
-                default=list(common.DEFAULT_BIDDABLE_STATUSES),
-            )
-            current_status = (project.status or "").lower()
-            if current_status not in allowed_statuses:
-                print(
-                    f"Project {project_id} status is '{project.status}', "
-                    f"not in bid-able statuses: {', '.join(allowed_statuses)}"
-                )
-                return common.EXIT_VALIDATION_ERROR
-
-            amount = args.amount
-            input_currency = project.currency_code or "USD"
-            if amount is None:
-                if project.suggested_bid is not None:
-                    amount = float(project.suggested_bid)
-                    input_currency = "USD"
-                elif project.budget_maximum:
-                    amount = float(project.budget_maximum)
-                elif project.budget_minimum:
-                    amount = float(project.budget_minimum)
-                else:
-                    raw_amount = input("Bid amount: ").strip()
-                    if not raw_amount:
-                        print("Missing bid amount.")
-                        return common.EXIT_VALIDATION_ERROR
-                    try:
-                        amount = float(raw_amount)
-                    except ValueError:
-                        print("Invalid bid amount.")
-                        return common.EXIT_VALIDATION_ERROR
-
-            input_amount = float(amount)
-            project_currency = project.currency_code or "USD"
-            suggested_bid_usd = (
-                float(project.suggested_bid)
-                if project.suggested_bid is not None
-                else None
-            )
-            try:
-                submission_amount = float(
-                    bid_service._resolve_submission_amount(project, input_amount, input_currency)
-                )
-            except ValueError as exc:
-                print(f"Failed to resolve submission amount: {exc}")
-                return common.EXIT_VALIDATION_ERROR
-
-            converted_for_submission = abs(submission_amount - input_amount) > 0.01
-            input_amount_currency = project_currency
-            if (
-                converted_for_submission
-                and suggested_bid_usd is not None
-                and abs(input_amount - suggested_bid_usd) <= 0.01
-            ):
-                input_amount_currency = "USD"
-
-            if args.proposal and not args.allow_manual_proposal:
-                print(
-                    "Manual proposal is disabled by default for compliance. "
-                    "Use --allow-manual-proposal to override."
-                )
-                return common.EXIT_VALIDATION_ERROR
-
-            if args.allow_manual_proposal:
-                proposal = (args.proposal or "").strip()
-                if not proposal:
-                    print("Missing manual proposal text.")
-                    return common.EXIT_VALIDATION_ERROR
-                proposal_source = "manual_override"
+            if args.submit:
+                if args.dry_run or not args.approval_id:
+                    raise ValueError('--submit requires an approved snapshot ID and cannot use --dry-run')
+                result = asyncio.run(submit_approved_bid(db, args.approval_id, store))
+                print(f"Submitted confirmed bid ID: {result['bid_id']}")
             else:
-                print("Generating proposal via ProposalService...")
-                proposal_service = get_proposal_service()
-                used_fallback = False
-                score_data = {
-                    "suggested_bid": float(submission_amount),
-                    "estimated_hours": int(project.estimated_hours)
-                    if getattr(project, "estimated_hours", None) is not None
-                    else None,
-                }
-                try:
-                    proposal_result = asyncio.run(
-                        proposal_service.generate_proposal(
-                            project,
-                            score_data=score_data,
-                            db=db,
-                        )
-                    )
-                except Exception as exc:
-                    logger.error(f"Proposal generation error: {exc}")
-                    print(f"Proposal generation error: {exc}")
-                    return common.EXIT_API_ERROR
-
-                proposal = (proposal_result.get("proposal") or "").strip()
-                validation_passed = proposal_result.get("validation_passed")
-                validation_issues = proposal_result.get("validation_issues") or []
-                error_code = proposal_result.get("error")
-
-                # 文案验证失败：禁止 fallback，要求后续继续优化后重试
-                if error_code == "proposal_validation_failed" or (
-                    validation_passed is False and validation_issues
-                ):
-                    issues_text = "；".join(str(i) for i in validation_issues) or "unknown"
-                    print(
-                        "Generated proposal failed validation. "
-                        f"Please refine prompt/config and retry. issues={issues_text}"
-                    )
-                    return common.EXIT_VALIDATION_ERROR
-
-                if (
-                    not proposal_result.get("success")
-                    or not proposal
-                ):
-                    logger.warning(
-                        "Primary proposal generation failed; using fallback template. "
-                        "error=%s validation_passed=%s",
-                        proposal_result.get("error"),
-                        validation_passed,
-                    )
-                    proposal = proposal_service.generate_fallback_proposal(project).strip()
-                    used_fallback = True
-
-                if not proposal:
-                    print(
-                        "Proposal generation failed. "
-                        f"error={proposal_result.get('error') or 'unknown'}"
-                    )
-                    return common.EXIT_API_ERROR
-
-                proposal = _align_proposal_with_amount(
-                    proposal,
-                    float(submission_amount),
-                    project_currency,
-                )
-
-                content_safe, risk_reason = bid_service.check_content_risk(proposal, project, submission_amount)
-                if not content_safe:
-                    print(f"Generated proposal blocked by content risk check: {risk_reason}")
-                    return common.EXIT_VALIDATION_ERROR
-                proposal_source = "fallback_draft" if used_fallback else "llm_final"
-
-            print("\nBid Preview")
-            print("-" * 40)
-            print(f"Project ID: {project.freelancer_id}")
-            print(f"Title: {project.title}")
-            if converted_for_submission:
-                print(f"Amount (input): {input_amount:.2f} {input_amount_currency}")
-                print(f"Amount (to submit): {submission_amount:.2f} {project_currency}")
-            else:
-                print(f"Amount: {submission_amount:.2f} {project_currency}")
-            print(f"Period: {args.period} days")
-            print(f"Proposal Source: {proposal_source}")
-            print("Proposal:")
-            print(proposal)
-            print("-" * 40)
-
-            if not args.no_save_preview:
-                try:
-                    archive_path = _save_preview_archive(
-                        Path(args.preview_archive_dir),
-                        project_id=project.freelancer_id,
-                        title=project.title or "",
-                        amount=float(submission_amount),
-                        currency=project_currency,
-                        input_amount=float(input_amount),
-                        input_currency=input_amount_currency,
-                        period=args.period,
-                        proposal_source=proposal_source,
-                        proposal=proposal,
-                    )
-                    print(f"Preview archived: {archive_path}")
-                except Exception as exc:
-                    logger.warning("Failed to archive preview: %s", exc)
-                    print(f"Warning: failed to archive preview: {exc}")
-
-            if args.dry_run:
-                print("[Dry Run] Bid not submitted.")
-                return common.EXIT_SUCCESS
-
-            confirm = input("Submit bid? [y/N]: ").strip().lower()
-            if confirm != "y":
-                print("Cancelled.")
-                return common.EXIT_SUCCESS
-
-            if proposal_source == "fallback_draft":
-                print(
-                    "Submission blocked: generated proposal is fallback draft, "
-                    "not a final proposal. Re-run later or use --allow-manual-proposal."
-                )
-                return common.EXIT_VALIDATION_ERROR
-
-            try:
-                asyncio.run(
-                    bid_service.create_bid(
-                        db,
-                        project_id=project.freelancer_id,
-                        amount=submission_amount,
-                        period=args.period,
-                        description=proposal,
-                        amount_currency=project_currency,
-                    )
-                )
-                project.status = "bid_submitted"
-                db.commit()
-                print("Bid submitted.")
-                return common.EXIT_SUCCESS
-            except FreelancerAPIError as exc:
-                error_text = str(exc.message or "")
-                if "SKILLS_REQUIREMENT_NOT_MET" in error_text:
-                    try:
-                        project.status = "skills_blocked"
-                        db.commit()
-                        print(
-                            f"Project {project_id} marked as skills_blocked "
-                            "due to platform skills requirement."
-                        )
-                    except Exception:
-                        db.rollback()
-                else:
-                    db.rollback()
-                logger.error(f"Bid API error: {exc.message}")
-                print(f"Bid API error: {exc.message}")
-                return common.EXIT_API_ERROR
-            except Exception as exc:
-                db.rollback()
-                logger.error(f"Bid error: {exc}")
-                print(f"Bid error: {exc}")
-                return common.EXIT_API_ERROR
+                if not args.project_id or args.amount is None:
+                    raise ValueError('Preparing a snapshot requires --project-id and --amount')
+                record = asyncio.run(prepare_bid(db, args.project_id, args.amount, args.period,
+                    args.proposal, args.amount_currency, store))
+                print(preview_text(record))
+                if not args.dry_run:
+                    notify_snapshot(QQBotClient(config), store, record)
+                print('Prepared only. No Freelancer bid was submitted.')
+    except Exception as exc:
+        print(f'Bid operation blocked: {type(exc).__name__}: {exc}')
+        return common.EXIT_VALIDATION_ERROR
+    return common.EXIT_SUCCESS
 
 
 if __name__ == "__main__":

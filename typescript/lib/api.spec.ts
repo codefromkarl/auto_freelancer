@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import {
   createBid,
+  prepareBid,
+  getBidApproval,
   getMessages,
   getMessageThreads,
   searchProjects,
@@ -9,6 +11,9 @@ import {
   exportProjects,
   scoreProject,
   updatePromptTemplate,
+  getWorkflow,
+  decideWorkflow,
+  resolveWorkflow,
 } from './api.ts';
 
 const originalFetch = globalThis.fetch;
@@ -70,6 +75,35 @@ test('uncertain submission errors propagate without retries', async () => {
   assert.equal(calls.length, 1);
 });
 
+test('prepare and submit preserve the approval ID and exact terms', async () => {
+  body = { status: 'success', data: { id: 'snapshot-id', state: 'pending' } };
+  const prepared = await prepareBid(123, 500, 7, 'USD');
+  assert.equal(prepared.id, 'snapshot-id');
+  assert.equal(calls[0].url, 'http://local.test/api/v1/approvals/prepare');
+  assert.deepEqual(JSON.parse(String(calls[0].options?.body)), {
+    project_id: 123,
+    amount: 500,
+    amount_currency: 'USD',
+    period: 7,
+  });
+  await getBidApproval(prepared.id);
+  assert.equal(calls[1].url, 'http://local.test/api/v1/approvals/snapshot-id');
+  await createBid(123, {
+    amount: 500,
+    amount_currency: 'USD',
+    period: 7,
+    approval_id: prepared.id,
+  });
+  assert.deepEqual(JSON.parse(String(calls[2].options?.body)), {
+    project_id: 123,
+    amount: 500,
+    amount_currency: 'USD',
+    period: 7,
+    approval_id: 'snapshot-id',
+  });
+  assert.equal(calls.length, 3);
+});
+
 test('thread list does not read every conversation', async () => {
   body = { data: [{ thread_id: 42, project_id: 123, unread_count: 2 }] };
   const threads = await getMessageThreads();
@@ -116,4 +150,29 @@ test('CSV exports use actual data and escape formula cells', async () => {
   body = { data: [{ id: 123, title: '=HYPERLINK("test")', status: 'open' }] };
   const csv = await exportProjects({ format: 'csv', fields: ['title'], filters: {} });
   assert.match(await csv.text(), /'=/);
+});
+
+test('workflow queue sends state filters, revisions and full clarification answers', async () => {
+  await getWorkflow('needs_clarification', 50);
+  const url = new URL(calls[0].url);
+  assert.equal(url.searchParams.get('state'), 'needs_clarification');
+  assert.equal(url.searchParams.get('offset'), '50');
+  await resolveWorkflow(123, 4, [{ id: 'question-id', answer: 'Two tables, read-only access' }]);
+  assert.equal(calls[1].url, 'http://local.test/api/v1/workflow/123/clarifications');
+  assert.deepEqual(JSON.parse(String(calls[1].options?.body)), {
+    revision: 4,
+    answers: [{ id: 'question-id', answer: 'Two tables, read-only access' }],
+  });
+});
+
+test('workflow version conflicts propagate without retrying a decision', async () => {
+  status = 409;
+  body = { detail: '候选版本已变化' };
+  await assert.rejects(decideWorkflow(123, 4, 'reject', 'Budget too low'), /版本已变化/);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(String(calls[0].options?.body)), {
+    revision: 4,
+    action: 'reject',
+    reason: 'Budget too low',
+  });
 });

@@ -9,6 +9,7 @@ sys.path.insert(0, str(PYTHON_SERVICE))
 import pytest
 
 from services.llm_scoring_service import LLMScoringService, LLMProviderConfig, LLMProvider
+from services.scoring_policy import DIMENSIONS
 from config import settings, Settings
 
 
@@ -31,6 +32,7 @@ class FakeProvider(LLMProvider):
             await asyncio.sleep(client.delay)
         return {
             "score": client.result,
+            "dimension_scores": {k: client.result for k in DIMENSIONS},
             "reason": "r",
             "suggested_bid": 100,
             "estimated_hours": 10,
@@ -227,48 +229,6 @@ def test_settings_anthropic_base_url_in_provider_config():
     assert anthropic["base_url"] == "https://lldai.online/api"
 
 
-def test_newcomer_profile_boosts_small_projects(monkeypatch):
-    service = LLMScoringService()
-
-    class DummyProject:
-        freelancer_id = 101
-        currency_code = "USD"
-        budget_minimum = 120
-        budget_maximum = 350
-        bid_stats = '{"bid_count": 15}'
-
-    monkeypatch.setattr(settings, "BID_SELECTION_PROFILE", "newcomer")
-
-    adjusted = service._apply_bid_profile_score_adjustment(
-        project=DummyProject(),
-        score=6.2,
-        estimated_hours=12,
-        hourly_rate=24.0,
-    )
-    assert adjusted > 6.2
-
-
-def test_newcomer_profile_penalizes_large_complex_projects(monkeypatch):
-    service = LLMScoringService()
-
-    class DummyProject:
-        freelancer_id = 102
-        currency_code = "USD"
-        budget_minimum = 9000
-        budget_maximum = 15000
-        bid_stats = '{"bid_count": 60}'
-
-    monkeypatch.setattr(settings, "BID_SELECTION_PROFILE", "newcomer")
-
-    adjusted = service._apply_bid_profile_score_adjustment(
-        project=DummyProject(),
-        score=7.6,
-        estimated_hours=120,
-        hourly_rate=95.0,
-    )
-    assert adjusted < 7.6
-
-
 @pytest.mark.asyncio
 async def test_score_projects_uses_db_prompt_before_default(monkeypatch):
     service = LLMScoringService()
@@ -279,12 +239,15 @@ async def test_score_projects_uses_db_prompt_before_default(monkeypatch):
     class DummyProject:
         freelancer_id = 301
         title = "Small automation task"
-        description = "Task"
+        description = "Build a Python automation task with acceptance tests"
         preview_description = "Task"
         budget_minimum = 100
         budget_maximum = 300
         currency_code = "USD"
         skills = None
+        owner_id = None
+        submitdate = None
+        full_description = None
         bid_stats = '{"bid_count": 8}'
         owner_info = None
         type_id = 1
@@ -316,15 +279,6 @@ async def test_score_projects_uses_db_prompt_before_default(monkeypatch):
 
     monkeypatch.setattr(service, "_create_provider_client", _create_provider_client)
 
-    class FakeScorer:
-        def fetch_weights_from_db(self, db):
-            return None
-
-        def estimate_project_hours(self, project_dict):
-            return 10
-
-    import services.llm_scoring_service as llm_scoring_module
-    monkeypatch.setattr(llm_scoring_module, "get_project_scorer", lambda: FakeScorer())
 
     from services import project_service
     monkeypatch.setattr(project_service, "update_project_ai_analysis", lambda *args, **kwargs: None)
@@ -335,6 +289,7 @@ async def test_score_projects_uses_db_prompt_before_default(monkeypatch):
         captured["prompt"] = system_prompt
         return True, {
             "score": 7.0,
+            "dimension_scores": {k: 7 for k in DIMENSIONS},
             "reason": "r",
             "suggested_bid": 120,
             "estimated_hours": 10,
@@ -364,12 +319,15 @@ async def test_score_projects_falls_back_to_default_when_db_prompt_invalid(monke
     class DummyProject:
         freelancer_id = 302
         title = "Small automation task"
-        description = "Task"
+        description = "Build a Python automation task with acceptance tests"
         preview_description = "Task"
         budget_minimum = 100
         budget_maximum = 300
         currency_code = "USD"
         skills = None
+        owner_id = None
+        submitdate = None
+        full_description = None
         bid_stats = '{"bid_count": 8}'
         owner_info = None
         type_id = 1
@@ -391,15 +349,6 @@ async def test_score_projects_falls_back_to_default_when_db_prompt_invalid(monke
         ),
     )
 
-    class FakeScorer:
-        def fetch_weights_from_db(self, db):
-            return None
-
-        def estimate_project_hours(self, project_dict):
-            return 10
-
-    import services.llm_scoring_service as llm_scoring_module
-    monkeypatch.setattr(llm_scoring_module, "get_project_scorer", lambda: FakeScorer())
 
     from services import project_service
     monkeypatch.setattr(project_service, "update_project_ai_analysis", lambda *args, **kwargs: None)
@@ -410,6 +359,7 @@ async def test_score_projects_falls_back_to_default_when_db_prompt_invalid(monke
         captured["prompt"] = system_prompt
         return True, {
             "score": 7.0,
+            "dimension_scores": {k: 7 for k in DIMENSIONS},
             "reason": "r",
             "suggested_bid": 120,
             "estimated_hours": 10,
@@ -427,4 +377,5 @@ async def test_score_projects_falls_back_to_default_when_db_prompt_invalid(monke
         max_retries=0,
     )
 
-    assert captured["prompt"] == "DEFAULT_PROMPT"
+    assert captured["prompt"].startswith("DEFAULT_PROMPT")
+    assert "dimension_scores" in captured["prompt"]

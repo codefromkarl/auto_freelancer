@@ -58,7 +58,7 @@ def test_step_generate_weekly_report_invokes_report_script(monkeypatch, tmp_path
     assert "--no-sync-awards" in captured["cmd"]
 
 
-def test_run_cycle_includes_weekly_report_summary(monkeypatch):
+def test_run_cycle_includes_weekly_report_summary(monkeypatch, workflow_db):
     module = _load_module(Path("scripts/manual_pipeline/scheduler.py"), "scheduler_weekly_report_cycle")
 
     async def _fake_fetch(*_args, **_kwargs):

@@ -60,7 +60,7 @@
 | | [4.5 获取线程消息](#45-获取线程消息) | GET /api/v1/messages/{id} |
 | | [4.6 标记线程为已读](#46-标记线程为已读) | PUT /api/v1/messages/{id}/read |
 | | [4.7 上传附件](#47-上传附件) | POST /api/v1/messages/upload |
-| | [4.8 Telegram 回调处理](#48-telegram-回调处理) | POST /api/v1/messages/telegram/callback |
+| | [4.8 QQ Bot 候选审批](#48-qq-bot-候选审批) | 不可变快照与 QQ 消息事件 |
 | **5. Kickoff** | | |
 | | [5.1 触发项目启动](#51-触发项目启动) | POST /api/v1/kickoff/trigger |
 | | [5.2 获取启动状态](#52-获取启动状态) | GET /api/v1/kickoff/{id} |
@@ -321,87 +321,34 @@ curl -X PUT "http://localhost:8000/api/v1/projects/38000123" \
 
 ### 1.4 项目 AI 评分
 
-> 使用内置评分系统为项目打分。
-
-#### 请求格式
+Web 与 CLI 共用结构化模型评分服务。调用会使用已配置模型；无可用模型、需求或关键数据不足、模型结果缺字段/含非有限数值时返回 HTTP 422，不回退为关键词规则分。评分不提交投标，默认不生成提案。
 
 ```http
 POST /api/v1/projects/{project_id}/score
+X-API-Key: your_api_key
 ```
 
-#### 请求参数
+成功返回 `status: success` 和更新后的完整项目对象。新增或相关字段如下：
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|:----:|------|
-| `project_id` | integer | 是 | Freelancer 项目 ID |
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `data.id` | integer | Freelancer 项目 ID |
+| `data.ai_score` | number | 程序按有效权重计算的 0–10 分数 |
+| `data.ai_reason` | string | 模型解释及实际经济计算、未知资料 |
+| `data.suggested_bid` | number | 美元建议报价；hourly 项目为每小时报价 |
+| `data.estimated_hours` | integer | 正整数估算工时 |
+| `data.hourly_rate` | number | 建议报价对应的真实毛时薪 USD/h，无人为下限 |
+| `data.scored_at` | string | UTC 评分时间 |
+| `data.score_metadata.source` | string | 本入口为 `llm`；手动更新为 `manual`，参考规则为 `rule` |
+| `data.score_metadata.version` | string | 评分契约版本 |
+| `data.score_metadata.dimensions` | object | 六维实际计算分：budget_efficiency/competition/clarity/customer/tech/risk |
+| `data.score_metadata.weights` | object | 实际生效的归一化权重 |
+| `data.score_metadata.model_dimensions` | object | 模型原始维度，供审计对照 |
+| `data.score_metadata.net_hourly_usd` | number | 按代码现行普通费用公式估算的净时薪，不含税费、接口和特殊收费 |
+| `data.score_metadata.unknown` | array | 缺失客户、竞争或发布时间资料的标记 |
+| `data.score_metadata.input_hash` / `policy_hash` | string | 评分输入与策略摘要，用于判断重评 |
 
-#### 响应格式
-
-```json
-{
-  "status": "success",
-  "data": {
-    "project_id": 0,
-    "ai_score": 0,
-    "ai_grade": "string",
-    "ai_reason": "string",
-    "ai_proposal_draft": "string",
-    "suggested_bid": 0,
-    "score_breakdown": {...}
-  }
-}
-```
-
-#### 响应参数
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `status` | string | 状态 |
-| `data` | object | 评分结果对象 |
-| `data.project_id` | integer | 项目 ID |
-| `data.ai_score` | number | 综合评分 (0-10) |
-| `data.ai_grade` | string | 评级 (A/B/C/D) |
-| `data.ai_reason` | string | 评分原因 |
-| `data.ai_proposal_draft` | string | 提案草稿 |
-| `data.suggested_bid` | number | 建议投标金额 |
-| `data.score_breakdown` | object | 评分细项 |
-| `data.score_breakdown.budget_score` | number | 预算匹配度 (0-10) |
-| `data.score_breakdown.competition_score` | number | 竞争程度 (0-10) |
-| `data.score_breakdown.clarity_score` | number | 描述清晰度 (0-10) |
-| `data.score_breakdown.customer_score` | number | 客户质量 (0-10) |
-| `data.score_breakdown.tech_score` | number | 技术匹配度 (0-10) |
-| `data.score_breakdown.risk_score` | number | 风险评估 (0-10) |
-
-#### 请求示例
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/projects/38000123/score" \
-     -H "X-API-Key: your_api_key"
-```
-
-#### 响应示例
-
-```json
-{
-  "status": "success",
-  "data": {
-    "project_id": 38000123,
-    "ai_score": 8.0,
-    "ai_grade": "A",
-    "ai_reason": "High budget match and required skills align perfectly.",
-    "ai_proposal_draft": "Hello, I can help you with...",
-    "suggested_bid": 350.00,
-    "score_breakdown": {
-      "budget_score": 9,
-      "competition_score": 7,
-      "clarity_score": 8,
-      "customer_score": 9,
-      "tech_score": 8,
-      "risk_score": 7
-    }
-  }
-}
-```
+`ai_score` 为偏好排序，不是中标概率。只有当前版本、输入/策略一致且未超过 TTL 的 LLM 分数能进入自动候选；可查看的旧分数不等于当前可投资格。
 
 ---
 
@@ -1216,52 +1163,20 @@ curl -X POST "http://localhost:8000/api/v1/messages/upload?thread_id=12345" \
 
 ---
 
-### 4.8 Telegram 回调处理
+### 4.8 QQ Bot 候选审批
 
-> 处理来自 Telegram inline 按钮的回调请求。
+旧通知回调已退役。QQ 接收器通过 Gateway 或独立 `/qqbot/callback` 签名入口接收事件，不能用旧接口触发 Freelancer 消息或投标。
 
-#### 请求格式
+- `POST /api/v1/approvals/prepare`：准备最终文案、报价和工期的不可变快照。
+- `POST /api/v1/proposals/evaluate`：评估显式标书，不创建批准或投标。请求包含 `project_id`、`amount`、`amount_currency`、`period`、`description`，使用同一 `X-API-Key` 验证。返回比较状态、公开价格/工期、价差、特征差距、复制风险、基础校验及人工复核事项；数据缺失或过期不表示低竞争。
+- `GET /api/v1/approvals/{approval_id}`：读取批准状态、有效期及是否启用真实提交。
+- `POST /api/v1/bids` 与 `POST /api/v1/proposals`：必须携带已经 QQ 批准的 `approval_id`，其他提交参数须与快照一致。
+- QQ 审批只改变本地批准状态；没有 `BID_SUBMISSION_ENABLED=true` 时不能真实投标。
 
-```http
-POST /api/v1/messages/telegram/callback
-```
+接收对象、审批者、过期、版本、风险复核、每日额度和远端项目条件均需通过检查。详见 [QQ 接入指南](../getting-started/QQBOT_GUIDE.md)。
 
-#### 请求体
+候选响应 `data.payload.competition_review` 冻结评估版本、最终文案摘要和竞标数据摘要。QQ 与项目详情显示公开报价中位数和改进提示；竞争者自述不是已核验履历。报价或文案变化需重新准备，超过竞标有效期或缺少当前评估的旧快照不能提交。
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|:----:|------|
-| `callback_data` | string | 是 | 回调数据 |
-
-**回调格式**: `action:thread_id:reply_id`
-
-| Action | 说明 |
-|--------|------|
-| `send` | 发送选中的 AI 回复 |
-| `ignore` | 忽略该消息线程 |
-
-#### 响应格式
-
-```json
-{
-  "status": "success",
-  "data": {
-    "message": "string"
-  }
-}
-```
-
-#### 请求示例
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/messages/telegram/callback" \
-     -H "X-API-Key: your_api_key" \
-     -H "Content-Type: application/json" \
-     -d '{"callback_data": "send:12345:1"}'
-```
-
----
-
-## 5. Kickoff (项目启动)
 
 ### 5.1 触发项目启动
 
@@ -1902,7 +1817,7 @@ session = Session(
 | `PYTHON_API_KEY` | Python Service API 密钥 |
 | `FREELANCER_OAUTH_TOKEN` | Freelancer OAuth Token |
 | `ANTHROPIC_API_KEY` | Anthropic Claude API 密钥 |
-| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
+| `QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET` | QQ Bot 私密鉴权配置 |
 
 ---
 
@@ -2001,3 +1916,21 @@ class FreelancerAPIError(Exception):
 | `status` | string | `success` 或 `error` |
 | `data` | object/array | 业务数据 |
 | `total` | integer | 总数量（分页时） |
+
+## 候选工作流 API
+
+均需 `X-API-Key`。这些接口只处理本地队列，不发送客户/QQ 消息、不批准或提交投标。
+
+| 方法与路径 | 作用 | 关键参数 |
+|---|---|---|
+| `GET /api/v1/workflow` | 分页读取已有队列 | `state`、`limit`（1–100）、`offset` |
+| `GET /api/v1/workflow/stats` | 阶段事件、当前状态数、评分调用/缓存/已观察 token、最近运行耗时 | `days`（1–90，默认 7）；费用为 null，用量完整性单独标记 |
+| `POST /api/v1/workflow/sync` | 将已有近期项目及既有审批/提交结果同步到队列 | `since_days`（默认 7）、`threshold`（默认 7） |
+| `POST /api/v1/workflow/{id}/decision` | 暂缓、拒绝或恢复重评 | `revision`、`action: defer/reject/resume`、`reason`；可选带时区的未来 `resume_at` |
+| `POST /api/v1/workflow/{id}/clarifications` | 完整录入本次问题答复并使旧评分失效 | `revision`、`answers: [{id, answer}]`；必须完整匹配当前问题 |
+
+响应 `data` 包含 `project_id/title/state/reason/reason_code/revision/questions/answers/resume_condition/resume_at/approval_id/ai_score`。队列版本冲突返回 409，不能重放旧写请求；未知项目返回 404，业务状态不允许或答复不完整返回 400。未回答的澄清问题不能通过“恢复”跳过。
+
+`state` 取值：`needs_evaluation/needs_clarification/ready/awaiting_approval/deferred/rejected/submitted/outcome_unknown`。没有直接设置任意状态、批准或重发投标的接口。恢复后仍须当前版本评分及原有 QQ 最终内容批准。
+
+评分 v3 的 `score_metadata.clarification_questions` 是模型提出的关键范围问题；最多五条，充分明确的任务可为空。统计 `stages[].count` 是观察条目/事件数，同一项目可重复出现；当前唯一候选数另见 `queue`。`runs[].status` 区分 running/completed/completed_with_errors/failed，`failed_stage` 和 `summary.step_durations_ms` 提供瓶颈线索。

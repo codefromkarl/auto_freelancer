@@ -5,7 +5,7 @@ Batch score and analyze projects with iterative feedback loop.
 Process:
 1. Score un-scored projects in batches of 10
 2. After each batch, send results to Gemini and OpenCode for analysis
-3. If both agree score >= 7.0, send to Telegram
+3. Send high-score summaries through QQ Bot (not a bid approval)
 4. Continue until all projects are scored
 """
 import argparse
@@ -130,36 +130,31 @@ Please provide your analysis conclusions and improvement recommendations directl
         return f"分析失败: {result.stderr}"
 
 
-def send_to_telegram(message: str) -> bool:
-    """Send message to Telegram."""
-    import os
-    from config import settings
-
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
-        print("Telegram未配置，跳过通知")
-        return False
-
+def send_to_qqbot(message: str) -> bool:
+    """Summary notification only; no bid approval or submission."""
+    from services.qqbot_service import QQBotClient, QQBotConfig
+    from services.qqbot_store import QQBotStore, canonical_hash
+    config = QQBotConfig.from_env()
     try:
-        import requests
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        proxies = common.get_telegram_proxies()
-        response = requests.post(url, json={
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "Markdown"
-        }, timeout=30, proxies=proxies)
-
-        if response.status_code == 200:
-            print(f"✓ Telegram消息已发送")
-            return True
-        else:
-            print(f"✗ Telegram发送失败: {response.text}")
+        config.require_target()
+        if len(message) > 1800:
+            raise ValueError('QQ summary exceeds message limit')
+        store = QQBotStore(config.state_path)
+        key = 'score-summary:' + canonical_hash({'app':config.app_id,
+            'scope':config.target_type,'target':config.target_id,'text':message})
+        if not store.reserve_notification(key):
+            print('QQ 摘要已处理，不自动重复发送')
             return False
-    except Exception as e:
-        print(f"✗ Telegram发送异常: {e}")
+        try:
+            message_id = QQBotClient(config).send_text(message)
+        except Exception:
+            store.finish_notification(key)
+            raise
+        store.finish_notification(key,message_id)
+        print('QQ 摘要发送取得回执；未批准或提交投标')
+        return True
+    except Exception as exc:
+        print(f'QQ 摘要未确认送达 ({type(exc).__name__})')
         return False
 
 
@@ -185,7 +180,7 @@ def process_batch(db, scorer, batch: List[Project], batch_num: int) -> Dict[str,
 
         # Use full_description if available, otherwise use preview_description
         # The database stores full_description in description field
-        description = project.description or project.preview_description or ""
+        description = project.full_description or project.description or project.preview_description or ""
 
         project_dict = {
             "id": project.freelancer_id,
@@ -213,7 +208,8 @@ def process_batch(db, scorer, batch: List[Project], batch_num: int) -> Dict[str,
             score.ai_score,
             score.ai_reason,
             score.ai_proposal_draft,
-            None  # suggested_bid not needed for rule-based scoring
+            None,  # Rule scores are for reference, never an automatic candidate.
+            score_metadata={"source": "rule", "total": score.ai_score}
         )
 
     # Commit batch updates
@@ -269,13 +265,13 @@ def process_batch(db, scorer, batch: List[Project], batch_num: int) -> Dict[str,
             f"  - {p.title} (ID: {p.freelancer_id}, 评分: {s.ai_score})"
             for p, s in high_score_projects
         ])
-        telegram_msg = f"""🎯 高分项目通知 (评分 >= 7.0)
+        qq_message = f"""🎯 高分项目通知 (评分 >= 7.0)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {project_list}
 
-🔗 查看详情"""
-        send_to_telegram(telegram_msg)
+仅评分摘要，尚未准备、批准或提交投标。"""
+        send_to_qqbot(qq_message)
 
     return {
         "batch_num": batch_num,

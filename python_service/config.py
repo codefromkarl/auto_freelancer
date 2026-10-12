@@ -3,6 +3,7 @@ Configuration management for Freelancer Python API Service.
 """
 
 from pydantic_settings import BaseSettings
+from pydantic import ValidationError, Field
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
@@ -63,7 +64,8 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "gpt-4o-mini"
     LLM_API_URL: Optional[str] = None
-    LLM_SCORING_MODE: str = "ensemble"
+    LLM_SCORING_MODE: str = "single"
+    SCORING_TTL_HOURS: float = Field(default=6.0, gt=0, allow_inf_nan=False)
 
     # Proposal generation configuration
     # Character-based limits are tuned from real Freelancer bid samples.
@@ -73,6 +75,7 @@ class Settings(BaseSettings):
     PROPOSAL_MAX_LENGTH: int = 1800
     PROPOSAL_TARGET_CHAR_MIN: int = 700
     PROPOSAL_TARGET_CHAR_MAX: int = 1200
+    PROPOSAL_COMPETITOR_CONTEXT_TTL_SECONDS: int = 1800
 
     # Database Configuration
     DATABASE_PATH: str = str(SERVICE_ROOT / "data" / "freelancer.db")
@@ -166,6 +169,15 @@ class Settings(BaseSettings):
 
     # 投标选择策略：newcomer(新手优先拿首单) / balanced(均衡)
     BID_SELECTION_PROFILE: str = "newcomer"
+    # Real submission is an independent, explicit operator switch.
+    BID_SUBMISSION_ENABLED: bool = False
+    # 0 disables the local daily cap; platform quotas and approval/idempotency still apply.
+    BID_MAX_DAILY_ATTEMPTS: int = Field(default=1, ge=0)
+    BID_MAX_DAILY_SCORED_PROJECTS: int = 20
+    BID_MAX_CANDIDATE_PREPARATIONS_PER_CYCLE: int = 10
+    BID_MAX_AMOUNT_USD: float = 1000.0
+    BID_MIN_NET_HOURLY_USD: float = Field(default=15.0, gt=0, allow_inf_nan=False)
+    BID_MAX_ESTIMATED_HOURS: int = 40
 
     # Project Kick-off Automation (方向六：中标后的"瞬间启动"工作流)
     KICKOFF_REPO_PROVIDER: str = "github"  # github, gitlab
@@ -320,4 +332,8 @@ class Settings(BaseSettings):
 
 
 # Global settings instance
-settings = Settings()
+try:
+    settings = Settings()
+except ValidationError as exc:
+    fields = sorted({'.'.join(str(part) for part in error['loc']) for error in exc.errors(include_input=False)})
+    raise RuntimeError('Application configuration is incomplete or invalid: ' + ', '.join(fields)) from None

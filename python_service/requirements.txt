@@ -26,3 +26,4 @@ anthropic>=0.40.0
 python-dateutil==2.8.2
 PyYAML==6.0.1
 dataclasses-json>=0.6.0
+cryptography>=43.0

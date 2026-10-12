@@ -127,7 +127,13 @@ async def get_stats(api_key: str = Depends(verify_api_key)):
 
 
 # Import routers
-from api import projects, bids, milestones, messages, ai_replies, kickoff, client_risk, configuration, proposals
+from api import projects, bids, milestones, messages, ai_replies, kickoff, client_risk, configuration, proposals, approvals, workflow
+
+app.include_router(workflow.router, prefix=f"{settings.API_V1_PREFIX}/workflow",
+                   dependencies=[Depends(verify_api_key)], tags=["Workflow"])
+
+app.include_router(approvals.router, prefix=f"{settings.API_V1_PREFIX}/approvals",
+                   dependencies=[Depends(verify_api_key)], tags=['Approvals'])
 
 # Include routers
 app.include_router(

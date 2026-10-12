@@ -115,10 +115,10 @@ STRUCTURE_THREE_STEP = """
 - 使用具体场景描述让客户产生共鸣
 - 长度：80-120字
 
-### 第二段：经验证词
-- 突出与项目相关的成功案例和经验
-- 具体说明技术方案的核心优势
-- 量化成果（如：提升效率XX%、节省成本XX）
+### 第二段：技术与交付依据
+- 具体说明技术方法、交付物和验收计划
+- 仅引用本人的已确认背景，缺少案例时用拟实施方法与样例验证建立可信度
+- 禁止编造年限、客户、成功案例或量化成果，禁止借用竞争者履历
 - 长度：150-200字
 
 ### 第三段：行动号召
@@ -204,7 +204,7 @@ class ProposalPromptBuilder:
         hard_char_max = max(target_char_max, int(getattr(settings, "PROPOSAL_MAX_LENGTH", 1800)))
 
         # 组装完整提示词
-        full_prompt = f"""You are a senior freelance developer on Freelancer.com, known for winning high-quality projects through personalized, technical, and persuasive proposals.
+        full_prompt = f"""Write a personalized technical proposal for the supplied Freelancer project, using only the supplied background and verified facts.
 
 {project_context}
 
@@ -267,7 +267,7 @@ Requirements:
         """
         # 提取项目基本信息
         title = project.get("title", "未命名项目")
-        description = project.get("description", "") or project.get(
+        description = project.get('full_description') or project.get("description", "") or project.get(
             "preview_description", ""
         )
 
@@ -327,7 +327,7 @@ Requirements:
 
         # 添加描述摘要
         if description:
-            desc_preview = description[:2000] if len(description) > 2000 else description
+            desc_preview = description[:12000]
             context_parts.append(f"\n### 项目详细描述：\n{desc_preview}")
 
         # 添加评分数据（如有）

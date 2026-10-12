@@ -6,6 +6,86 @@ export interface ApiResponse<T> {
   is_syncing?: boolean;
 }
 
+export interface BidApproval {
+  id: string;
+  digest: string;
+  state: string;
+  expires_at: number;
+  submission_enabled: boolean;
+  payload: {
+    project_id: number;
+    title: string;
+    amount: number;
+    currency: string;
+    period: number;
+    description: string;
+    review_required: boolean;
+    review_notes: string[];
+    competition_review?: {
+      status: string;
+      policy_version: string;
+      premium_pct: number | null;
+      findings: string[];
+      blocking_issues: string[];
+      benchmark: {
+        status: string;
+        currency: string;
+        visible_count: number;
+        price_count: number;
+        complete: boolean;
+        price: { median?: number };
+      };
+    };
+  };
+}
+
+export type WorkflowState =
+  | 'needs_evaluation'
+  | 'needs_clarification'
+  | 'ready'
+  | 'awaiting_approval'
+  | 'deferred'
+  | 'rejected'
+  | 'submitted'
+  | 'outcome_unknown';
+
+export interface WorkflowCandidate {
+  project_id: number;
+  title: string;
+  state: WorkflowState;
+  reason_code: string;
+  reason: string;
+  revision: number;
+  questions: { id: string; question: string }[];
+  answers: { id: string; question: string; answer: string; source: string }[];
+  held_by: string | null;
+  resume_condition: string | null;
+  resume_at: string | null;
+  approval_id: string | null;
+  ai_score: number | null;
+  updated_at: string | null;
+}
+
+export interface WorkflowStats {
+  queue: Partial<Record<WorkflowState, number>>;
+  stages: { stage: string; outcome: string; reason_code: string | null; count: number }[];
+  model_usage: {
+    calls: number;
+    cache_hits: number;
+    observed_tokens: number;
+    token_usage_complete: boolean;
+    cost: null;
+  };
+  runs: {
+    id: string;
+    status: string;
+    started_at: string;
+    duration_ms: number | null;
+    failed_stage: string | null;
+    summary: { step_durations_ms?: Record<string, number> } | null;
+  }[];
+}
+
 export interface Project {
   id: number;
   title: string;
@@ -23,6 +103,15 @@ export interface Project {
   owner_info?: Record<string, unknown> | string | null;
   ai_score?: number | null;
   ai_reason?: string | null;
+  scored_at?: string | null;
+  score_metadata?: {
+    source: 'llm' | 'manual' | 'rule';
+    version?: string;
+    total: number;
+    dimensions?: Record<string, number>;
+    net_hourly_usd?: number;
+    unknown?: string[];
+  } | null;
   ai_proposal_draft?: string | null;
   suggested_bid?: number | null;
   estimated_hours?: number | null;

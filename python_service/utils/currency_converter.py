@@ -18,7 +18,7 @@ class CurrencyConverter:
     Example: if 1 USD = 83 INR, then INR rate is 1/83 = 0.012048.
     """
     
-    API_URL = "https://api.frankfurter.app/latest"
+    API_URL = "https://api.frankfurter.dev/v1/latest"
     CACHE_FILE = str(Path(__file__).resolve().parents[1] / "data" / "currency_rates.json")
     CACHE_TTL = 24 * 3600  # 24 hours
     FALLBACK_RATES = {

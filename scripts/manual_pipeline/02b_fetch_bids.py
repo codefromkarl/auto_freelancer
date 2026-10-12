@@ -19,6 +19,7 @@ sys.path.insert(0, str(script_dir))
 
 import common
 from database.models import Project
+from services.project_service import published_since
 from services import competitor_bid_service
 
 
@@ -83,7 +84,7 @@ def main(argv=None) -> int:
             query = (
                 db.query(Project)
                 .filter(func.lower(Project.status).in_(allowed_statuses))
-                .filter(Project.created_at >= cutoff_time)
+                .filter(published_since(cutoff_time))
             )
             if not args.include_hourly:
                 query = query.filter(Project.type_id == 1)

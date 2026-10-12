@@ -15,6 +15,8 @@ sys.path.insert(0, str(script_dir))
 
 import common
 from database.models import Project
+from services.project_service import published_since, publication_timestamp
+from services.scoring_policy import score_is_current, policy_signature
 from services.llm_scoring_service import get_scoring_service
 
 
@@ -56,8 +58,8 @@ def main(argv=None) -> int:
             print(f"Failed to load settings: {exc}")
             return common.EXIT_VALIDATION_ERROR
 
-        if args.since_days <= 0:
-            print("--since-days must be greater than 0.")
+        if args.since_days <= 0 or args.limit <= 0 or args.batch_size <= 0 or args.max_retries < 0:
+            print("--since-days, --limit and --batch-size must be positive; retries must be nonnegative.")
             return common.EXIT_VALIDATION_ERROR
 
         allowed_statuses = common.parse_statuses(
@@ -81,16 +83,18 @@ def main(argv=None) -> int:
             # Get pending projects (not scored yet)
             pending = (
                 db.query(Project)
-                .filter(Project.ai_score.is_(None))
                 .filter(func.lower(Project.status).in_(allowed_statuses))
-                .filter(Project.created_at >= cutoff_time)
-                .order_by(Project.created_at.desc())
-                .limit(args.limit)
+                .filter(published_since(cutoff_time))
+                .order_by(publication_timestamp().desc(), Project.freelancer_id.desc())
                 .all()
             )
             if not args.include_hourly:
                 pending = [p for p in pending if getattr(p, "type_id", None) == 1]
 
+            from services import workflow_service as workflow
+            workflow.reconcile(db)
+            signature = policy_signature(db)
+            pending = [p for p in pending if workflow.evaluation_allowed(db, p) and not score_is_current(p, signature)][:args.limit]
             if not pending:
                 print("Scored 0 projects. No un-scored projects found.")
                 return common.EXIT_SUCCESS
@@ -118,7 +122,7 @@ def main(argv=None) -> int:
             print(f"Top Score: {top_score:.1f} (Project ID: {top_label})")
             print(f"{'='*60}")
 
-            return common.EXIT_SUCCESS
+            return common.EXIT_API_ERROR if errors else common.EXIT_SUCCESS
 
 
 if __name__ == "__main__":

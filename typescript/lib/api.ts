@@ -10,7 +10,49 @@ import type {
   CompetitorAnalysis,
   Message,
   MessageThread,
+  BidApproval,
+  WorkflowCandidate,
+  WorkflowStats,
+  WorkflowState,
 } from './types';
+
+export function getWorkflow(state?: WorkflowState, offset = 0) {
+  const params = new URLSearchParams({ limit: '50', offset: String(offset) });
+  if (state) params.set('state', state);
+  return request<ApiResponse<WorkflowCandidate[]>>(`/workflow?${params}`);
+}
+
+export async function getWorkflowStats() {
+  return (await request<ApiResponse<WorkflowStats>>('/workflow/stats')).data;
+}
+
+export function syncWorkflow() {
+  return request('/workflow/sync', json('POST', { since_days: 7, threshold: 7 }));
+}
+
+export function decideWorkflow(
+  projectId: number,
+  revision: number,
+  action: 'defer' | 'reject' | 'resume',
+  reason: string,
+  resumeAt?: string
+) {
+  return request<ApiResponse<WorkflowCandidate>>(
+    `/workflow/${projectId}/decision`,
+    json('POST', { revision, action, reason, ...(resumeAt ? { resume_at: resumeAt } : {}) })
+  );
+}
+
+export function resolveWorkflow(
+  projectId: number,
+  revision: number,
+  answers: { id: string; answer: string }[]
+) {
+  return request<ApiResponse<WorkflowCandidate>>(
+    `/workflow/${projectId}/clarifications`,
+    json('POST', { revision, answers })
+  );
+}
 
 function configuration() {
   return {
@@ -92,12 +134,31 @@ export async function createBid(
     period: number;
     description?: string;
     amount_currency?: string;
+    approval_id?: string;
   }
 ) {
   return request<ApiResponse<{ bid_id: number; status: string }>>(
     '/bids',
     json('POST', { project_id: projectId, ...data })
   );
+}
+
+export async function prepareBid(
+  projectId: number,
+  amount: number,
+  period: number,
+  currency: string
+) {
+  return (
+    await request<ApiResponse<BidApproval>>(
+      '/approvals/prepare',
+      json('POST', { project_id: projectId, amount, period, amount_currency: currency })
+    )
+  ).data;
+}
+
+export async function getBidApproval(id: string) {
+  return (await request<ApiResponse<BidApproval>>(`/approvals/${encodeURIComponent(id)}`)).data;
 }
 
 function unsupported(operation: string): never {

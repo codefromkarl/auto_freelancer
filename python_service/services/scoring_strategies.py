@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 import logging
+import json
 from sqlalchemy.orm import Session
 
 from services.project_scorer import (
@@ -281,17 +282,21 @@ class LLMBasedScoringStrategy(ScoringStrategy):
             freelancer_id=project_data.get("id", 0),
             title=project_data.get("title", ""),
             description=project_data.get("description"),
+            full_description=project_data.get("full_description"),
+            skills=project_data.get("skills"), owner_id=project_data.get("owner_id"),
+            submitdate=project_data.get("submitdate"),
+            type_id=project_data.get("type_id", 1 if project_data.get("type") == "fixed" else 2 if project_data.get("type") == "hourly" else None),
             preview_description=project_data.get("preview_description"),
             budget_minimum=project_data.get("budget_minimum"),
             budget_maximum=project_data.get("budget_maximum"),
             currency_code=project_data.get("currency_code", "USD"),
-            bid_stats=str(project_data.get("bid_stats", {})),
-            owner_info=str(project_data.get("owner_info", {})),
+            bid_stats=json.dumps(project_data.get("bid_stats")),
+            owner_info=json.dumps(project_data.get("owner_info")),
         )
 
         result = await service.score_single_project(
             project,
-            system_prompt=effective_prompt,
+            system_prompt=effective_prompt, db=db,
         )
 
         if result is None:
@@ -307,8 +312,8 @@ class LLMBasedScoringStrategy(ScoringStrategy):
         return ScoringResult(
             score=result.get("score", 0.0),
             grade=self._calculate_grade(result.get("score", 0.0)),
-            breakdown={},
-            confidence=0.9,  # LLM 评分置信度较高
+            breakdown=result["metadata"]["dimensions"],
+            confidence=0.0,  # No empirically calibrated confidence is available.
             strategy_used=self.name,
             metadata={
                 "reason": result.get("reason"),

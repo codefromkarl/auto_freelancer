@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
 """
-Automated pipeline scheduler.
-
-Runs a fetch → score → analyze → bid cycle every N minutes.
-Only bids on new high-scoring projects that pass all quality gates.
-
-Schedule modes:
-    Day   (08:00-24:00): fetch → score → bid, 5-10 min random interval
-    Night (00:00-08:00): fetch → score only, candidates accumulated;
-                         at 08:00 batch-push to Telegram for notification, then auto-bid
-
-Usage:
-    python scheduler.py                          # default: 5-min interval
-    python scheduler.py --interval 10            # 10-min interval
-    python scheduler.py --dry-run                # preview only, no real bids
-    python scheduler.py --once                   # single run then exit
-    python scheduler.py --bid-threshold 7.5      # only bid on score >= 7.5
-    python scheduler.py --night-start 0 --night-end 8  # night hours (default)
+Bounded polling pipeline: fetch -> score -> immutable QQ preview -> approved submission.
+Default preview mode never submits. Real mode additionally requires the persistent
+submission switch, configured approvers and an unexpired content-bound approval.
+QQ Gateway runs separately via run_qqbot.py. Night collection-only mode pauses
+candidate preparation and submission until the next daytime polling cycle.
 """
 from __future__ import annotations
 
@@ -24,6 +12,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import signal
@@ -50,21 +39,8 @@ _PROXY_ENV_KEYS = [
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "all_proxy",
 ]
-_TELEGRAM_PROXY_ENV_KEYS = [
-    "TELEGRAM_PROXY",
-    "TELEGRAM_HTTPS_PROXY",
-    "TELEGRAM_HTTP_PROXY",
-    "HTTPS_PROXY",
-    "https_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-]
-
 # Graceful shutdown flag
 _shutdown = False
-
-# 夜间积累的候选项目（跨 cycle 持久化，8:00 统一通知并自动投标）
-_night_candidates: List[Dict[str, Any]] = []
 
 
 def _handle_signal(signum, frame):
@@ -108,48 +84,6 @@ def _human_delay(min_sec: float = 1.0, max_sec: float = 3.0) -> None:
     time.sleep(delay)
 
 
-def _first_nonempty_env(keys: List[str]) -> Optional[str]:
-    for key in keys:
-        value = os.getenv(key)
-        if value and value.strip():
-            return value.strip()
-    return None
-
-
-def _build_telegram_proxies() -> Optional[Dict[str, str]]:
-    """Build explicit Telegram proxy settings from env."""
-    return common.get_telegram_proxies()
-
-
-def _promote_telegram_proxy_env(logger: Optional[logging.Logger] = None) -> None:
-    """
-    Preserve a Telegram-specific proxy before global proxy cleanup.
-
-    Scheduler usually clears global proxy variables for pipeline stability.
-    Telegram requests are isolated to TELEGRAM_PROXY so notifications can still work.
-    """
-    # If already set, we are good
-    if os.getenv("TELEGRAM_PROXY"):
-        if logger:
-            logger.debug("TELEGRAM_PROXY already set: %s", os.getenv("TELEGRAM_PROXY"))
-        return
-
-    # Look for any existing proxy to promote
-    proxies = common.get_telegram_proxies()
-    if proxies:
-        proxy_url = proxies["https"]
-        os.environ["TELEGRAM_PROXY"] = proxy_url
-        if logger:
-            logger.info("Promoted %s to TELEGRAM_PROXY", proxy_url)
-    else:
-        if logger:
-            logger.debug("No proxy found to promote to TELEGRAM_PROXY")
-
-
-# ============================================================================
-# Core pipeline functions
-# ============================================================================
-
 async def _step_fetch(
     keywords: List[str],
     limit: int,
@@ -162,6 +96,7 @@ async def _step_fetch(
     from services import project_service
 
     new_ids: Set[int] = set()
+    successful_reads = 0
     with common.get_db_context() as db:
         for i, keyword in enumerate(keywords):
             # 关键词之间短延迟（API 自带限流，无需过长等待）
@@ -178,13 +113,18 @@ async def _step_fetch(
                     allowed_statuses=allowed_statuses,
                     fixed_price_only=fixed_price_only,
                 )
+                successful_reads += 1
                 for item in results:
                     pid = item.get("id")
                     if pid is not None:
                         new_ids.add(int(pid))
             except Exception as exc:
                 logger.error("Fetch error for keyword '%s': %s", keyword, exc)
+                from services import workflow_service as workflow
+                workflow.event(db, "fetch", "failed", reason=type(exc).__name__)
 
+    if not successful_reads:
+        raise RuntimeError("All project fetches failed; this cycle is stopped")
     logger.info("Fetched %d unique project IDs", len(new_ids))
     return new_ids
 
@@ -196,6 +136,7 @@ async def _step_fetch_competitor_bids(
     concurrency: int,
     logger: logging.Logger,
     skip_recently_fetched_minutes: int = 30,
+    project_ids: Optional[Set[int]] = None,
 ) -> int:
     """Fetch competitor bids for market-active projects and all our bidded projects.
 
@@ -203,6 +144,7 @@ async def _step_fetch_competitor_bids(
     within the last ``skip_recently_fetched_minutes`` minutes.
     """
     from database.models import Project
+    from services.project_service import published_since
     from services import competitor_bid_service
 
     cutoff = datetime.utcnow() - timedelta(days=since_days)
@@ -212,10 +154,12 @@ async def _step_fetch_competitor_bids(
         query = (
             db.query(Project)
             .filter(func.lower(Project.status).in_(allowed_statuses))
-            .filter(Project.created_at >= cutoff)
+            .filter(published_since(cutoff))
         )
         if fixed_price_only:
-            query = query.filter(or_(Project.type_id == 1, Project.type_id.is_(None)))
+            query = query.filter(Project.type_id == 1)
+        if project_ids is not None:
+            query = query.filter(Project.freelancer_id.in_(project_ids))
         projects = query.all()
 
         eligible = set()
@@ -240,7 +184,7 @@ async def _step_fetch_competitor_bids(
                 bid_stats_ids.add(p.freelancer_id)
 
         # Ensure coverage for all projects we have already bid on.
-        bidded_ids = competitor_bid_service.get_bidded_project_ids(db, since_days=None)
+        bidded_ids = competitor_bid_service.get_bidded_project_ids(db, since_days=None) if project_ids is None else []
         # 已投标项目也做增量检查
         for bid_pid in bidded_ids:
             proj = db.query(Project).filter(Project.freelancer_id == bid_pid).first()
@@ -283,29 +227,41 @@ async def _step_score(
 ) -> int:
     """Score unscored projects. Returns count of newly scored."""
     from database.models import Project
+    from services.project_service import published_since, publication_timestamp
+    from services.scoring_policy import score_is_current, policy_signature
     from services.llm_scoring_service import get_scoring_service
 
     cutoff = datetime.utcnow() - timedelta(days=since_days)
     with common.get_db_context() as db:
         pending = (
             db.query(Project)
-            .filter(Project.ai_score.is_(None))
             .filter(func.lower(Project.status).in_(allowed_statuses))
-            .filter(Project.created_at >= cutoff)
-            .order_by(Project.created_at.desc())
-            .limit(50)
+            .filter(published_since(cutoff))
+            .order_by(publication_timestamp().desc(), Project.freelancer_id.desc())
             .all()
         )
         if fixed_price_only:
-            # Include type_id=1 (fixed) and type_id=None (unknown, likely fixed
-            # since hourly projects are filtered out during API fetch)
-            pending = [p for p in pending if getattr(p, "type_id", None) in (1, None)]
+            # Unknown billing types stay deferred until confirmed fixed.
+            pending = [p for p in pending if getattr(p, "type_id", None) == 1]
 
+        from services import workflow_service as workflow
+        signature = policy_signature(db)
+        pending = [p for p in pending if workflow.evaluation_allowed(db, p) and not score_is_current(p, signature)][:50]
         if not pending:
-            logger.info("No unscored projects found")
+            logger.info("No projects need scoring")
             return 0
 
+        from config import settings
+        from services.qqbot_service import QQBotConfig
+        from services.qqbot_store import QQBotStore
+        store = QQBotStore(QQBotConfig.from_env().state_path)
+        allowance = store.score_allowance(len(pending), settings.BID_MAX_DAILY_SCORED_PROJECTS)
+        pending = pending[:allowance]
+        if not pending:
+            logger.info('Daily scoring limit reached')
+            return 0
         scoring_service = get_scoring_service()
+        scoring_service.config.generate_proposals = False
         total_scored, errors, _, _ = await scoring_service.score_projects_concurrent(
             projects=pending, db=db, batch_size=batch_size, max_retries=2,
         )
@@ -325,7 +281,12 @@ def select_bid_candidates(
     Returns list of Project ORM objects (detached-safe for read).
     """
     from database.models import Project, Bid, BidSubmission
+    from services.project_service import published_since, publication_timestamp
+    from services.scoring_policy import score_is_current, policy_signature, object_value
+    from services.approved_bids import validate_terms, risk_review
 
+    if max_candidates <= 0:
+        return []
     cutoff = datetime.utcnow() - timedelta(days=since_days)
     with common.get_db_context() as db:
         # Subquery: project IDs that already have an active bid
@@ -341,22 +302,40 @@ def select_bid_candidates(
             .filter(Project.ai_score >= bid_threshold)
             .filter(Project.ai_score.isnot(None))
             .filter(func.lower(Project.status).in_(allowed_statuses))
-            .filter(Project.created_at >= cutoff)
+            .filter(published_since(cutoff))
             .filter(~Project.freelancer_id.in_(already_bid_subq))
             .filter(~Project.freelancer_id.in_(db.query(BidSubmission.project_freelancer_id)))
         )
         if fixed_price_only:
-            query = query.filter(or_(Project.type_id == 1, Project.type_id.is_(None)))
+            query = query.filter(Project.type_id == 1)
 
         candidates = (
-            query.order_by(Project.ai_score.desc())
-            .limit(max_candidates)
+            query.order_by(Project.ai_score.desc(), publication_timestamp().desc(), Project.freelancer_id.desc())
             .all()
         )
 
         # Detach-safe: convert to dicts with needed fields
         result = []
+        from services import workflow_service as workflow
+        workflow.reconcile(db)
+        signature = policy_signature(db)
         for p in candidates:
+            row = workflow.refresh_readiness(db, p, bid_threshold, signature)
+            if row.state != "ready":
+                continue
+            if not score_is_current(p, signature):
+                continue
+            if object_value(p.score_metadata).get("candidate_blocked"):
+                continue
+            if p.suggested_bid is None or p.estimated_hours is None:
+                continue
+            try:
+                from services.bid_service import _resolve_submission_amount
+                native = _resolve_submission_amount(p, float(p.suggested_bid), "USD")
+                validate_terms(p, native, _determine_bid_period({"estimated_hours": p.estimated_hours}))
+                risk_review(p)
+            except (ValueError, TypeError, OverflowError):
+                continue
             result.append({
                 "freelancer_id": p.freelancer_id,
                 "title": p.title,
@@ -368,6 +347,8 @@ def select_bid_candidates(
                 "estimated_hours": p.estimated_hours,
                 "status": p.status,
             })
+            if len(result) >= max_candidates:
+                break
         return result
 
 
@@ -395,192 +376,107 @@ def _determine_bid_period(candidate: Dict[str, Any]) -> int:
     hours = candidate.get("estimated_hours")
     if hours and hours > 0:
         # ~6 productive hours per day
-        days = max(2, round(hours / 6))
+        days = max(2, math.ceil(hours / 6))
         return min(days, 30)
     return 7  # default 7 days
 
 
-async def _step_auto_bid(
-    candidates: List[Dict[str, Any]],
-    dry_run: bool,
-    logger: logging.Logger,
-) -> List[Dict[str, Any]]:
-    """Execute bids on candidate projects. Returns list of bid results."""
+async def _step_auto_bid(candidates, dry_run, logger, replacement_selector=None):
+    """Prepare, notify and submit only an immutable, explicitly approved snapshot."""
+    from services.approved_bids import prepare_bid, submit_approved_bid
+    from services.qqbot_service import QQBotClient, QQBotConfig
+    from services.qqbot_store import QQBotStore
+    from services.qqbot_events import notify_snapshot
+    config = QQBotConfig.from_env()
+    if not config.target_id or not config.approvers:
+        logger.warning('QQ target/approvers not configured; candidates stay local, no approval or submission')
+        return [{'project_id': c['freelancer_id'], 'status': 'configuration_required'} for c in candidates]
+    store = QQBotStore(config.state_path)
+    client = QQBotClient(config)
+    results = []
+    from config import settings
     from database.models import Project
-    from services import bid_service
-    from services.freelancer_client import FreelancerAPIError
-
-    bid_results: List[Dict[str, Any]] = []
-
-    for i, candidate in enumerate(candidates):
-        # 投标间短延迟（proposal 生成本身已有数秒延迟）
-        if i > 0:
-            _human_delay(1.0, 2.0)
-
-        pid = candidate["freelancer_id"]
-        amount = _determine_bid_amount(candidate)
-        if amount is None:
-            logger.warning("Cannot determine bid amount for project %s, skipping", pid)
+    from services.scoring_policy import object_value
+    queue = list(candidates)
+    target = len(queue)
+    prepared = 0
+    attempted = set()
+    while queue and prepared < target and len(attempted) < settings.BID_MAX_CANDIDATE_PREPARATIONS_PER_CYCLE:
+        candidate = queue.pop(0)
+        pid = candidate['freelancer_id']
+        if pid in attempted:
             continue
-        currency = candidate.get("currency_code") or "USD"
-        amount_currency = "USD" if candidate.get("suggested_bid") else currency
-        if amount_currency != currency:
-            from utils.currency_converter import get_currency_converter
-            rate = get_currency_converter().get_rate_sync(currency)
-            if rate is None or rate <= 0:
-                logger.error("Cannot convert suggested amount for project %s", pid)
-                continue
-            amount = round(amount / rate, 2)
-
-        period = _determine_bid_period(candidate)
-
-        if dry_run:
-            logger.info(
-                "[DRY RUN] Would bid on project %s: %.2f %s, %d days (score=%.1f)",
-                pid, amount, currency, period, candidate.get("ai_score", 0),
-            )
-            bid_results.append({
-                "project_id": pid,
-                "amount": amount,
-                "currency": currency,
-                "period": period,
-                "status": "dry_run",
-                "title": candidate.get("title", ""),
-            })
-            continue
-
-        with common.get_db_context() as db:
-            try:
-                result = await bid_service.create_bid(
-                    db,
-                    project_id=pid,
-                    amount=amount,
-                    period=period,
-                    description=None,  # Let ProposalService generate
-                    amount_currency=currency,
-                )
-                submitted_amount = float(result.get("amount", amount)) if isinstance(result, dict) else float(amount)
-                # Mark project as bid_submitted
+        attempted.add(pid)
+        operation_stage = "preparation"
+        try:
+            amount = _determine_bid_amount(candidate)
+            if amount is None:
+                raise ValueError('Missing proposed amount')
+            period = _determine_bid_period(candidate)
+            with common.get_db_context() as db:
+                snapshot = await prepare_bid(db, pid, amount, period,
+                    amount_currency='USD' if candidate.get('suggested_bid') else candidate.get('currency_code'), store=store)
+                prepared += 1
+                try:
+                    confirmed = await asyncio.to_thread(notify_snapshot, client, store, snapshot)
+                    if confirmed:
+                        from services import workflow_service as workflow
+                        workflow.event(db, "notification", "confirmed", project_id=pid,
+                            key=f"notified:{snapshot['id']}")
+                except Exception as exc:
+                    logger.error('QQ notification failed (%s); delivery not confirmed', type(exc).__name__)
+                    from services import workflow_service as workflow
+                    workflow.event(db, 'notification', 'failed', project_id=pid, reason=type(exc).__name__)
+                    results.append({'project_id': pid, 'status': 'notification_failed'})
+                    continue
+                current = store.get(snapshot['id'])
+                if dry_run or current['state'] != 'approved':
+                    results.append({'project_id': pid, 'approval_id': snapshot['id'],
+                        'status': 'dry_run' if dry_run else 'awaiting_approval'})
+                else:
+                    operation_stage = "submission"
+                    result = await submit_approved_bid(db, snapshot['id'], store)
+                    results.append({'project_id': pid, 'status': result['status']})
+        except Exception as exc:
+            logger.error('Candidate %s blocked (%s): %s', pid, type(exc).__name__, exc)
+            results.append({'project_id': pid, 'status': 'error'})
+            with common.get_db_context() as db:
                 project = db.query(Project).filter_by(freelancer_id=pid).first()
-                if project:
-                    project.status = "bid_submitted"
-                    db.commit()
-
-                logger.info(
-                    "✅ Bid submitted: project=%s amount=%.2f %s period=%d",
-                    pid, submitted_amount, currency, period,
-                )
-                bid_results.append({
-                    "project_id": pid,
-                    "amount": submitted_amount,
-                    "currency": currency,
-                    "period": period,
-                    "status": "submitted",
-                    "title": candidate.get("title", ""),
-                })
-            except FreelancerAPIError as exc:
-                error_text = str(exc.message or "")
-                logger.error("Bid API error for project %s: %s", pid, error_text)
-                # Mark unbiddable projects to exclude from future cycles
-                block_status = None
-                if "SKILLS_REQUIREMENT_NOT_MET" in error_text:
-                    block_status = "skills_blocked"
-                elif "UNLISTED_NOT_PREFERRED" in error_text:
-                    block_status = "preferred_only"
-                elif "ESCROWCOM_ACCOUNT_UNLINKED" in error_text:
-                    block_status = "escrow_required"
-                if block_status:
-                    try:
-                        project = db.query(Project).filter_by(freelancer_id=pid).first()
-                        if project:
-                            project.status = block_status
-                            db.commit()
-                            logger.info("Marked project %s as '%s'", pid, block_status)
-                    except Exception:
-                        db.rollback()
-                bid_results.append({
-                    "project_id": pid,
-                    "status": "error",
-                    "error": error_text,
-                })
-            except Exception as exc:
-                error_str = str(exc)
-                logger.error("Bid error for project %s: %s", pid, exc)
-                # Mark permanently unbiddable projects to prevent retry loops
-                permanent_block = None
-                if "Object doesn't exist" in error_str or "Project not found" in error_str:
-                    permanent_block = "not_found"
-                elif "not biddable now" in error_str:
-                    permanent_block = "not_biddable"
-                elif "outside the absolute allowed range" in error_str:
-                    permanent_block = "amount_out_of_range"
-                if permanent_block:
-                    try:
-                        project = db.query(Project).filter_by(freelancer_id=pid).first()
-                        if project:
-                            project.status = permanent_block
-                            db.commit()
-                            logger.info("Marked project %s as '%s'", pid, permanent_block)
-                    except Exception:
-                        db.rollback()
-                bid_results.append({
-                    "project_id": pid,
-                    "status": "error",
-                    "error": error_str,
-                })
-
-    return bid_results
+                if project is not None:
+                    metadata = object_value(project.score_metadata)
+                    if isinstance(metadata, dict):
+                        metadata['candidate_blocked'] = type(exc).__name__
+                        project.score_metadata = json.dumps(metadata, ensure_ascii=False)
+                    from services import workflow_service as workflow
+                    row = workflow.ensure(db, project)
+                    workflow.reconcile(db)
+                    if row.state not in {"submitted", "outcome_unknown"}:
+                        workflow.transition(db, row, "deferred", "preparation_failed", str(exc),
+                            held_by="system", resume_condition="score_changed")
+                    if operation_stage == "preparation":
+                        workflow.event(db, "preparation", "failed", project_id=pid, reason=type(exc).__name__)
+            if replacement_selector is not None:
+                queue.extend(c for c in replacement_selector() if c['freelancer_id'] not in attempted
+                             and c['freelancer_id'] not in {p['freelancer_id'] for p in queue})
+    return results
 
 
-def _send_telegram_notification(
-    bid_results: List[Dict[str, Any]],
-    logger: logging.Logger,
-) -> None:
-    """Send Telegram notification for submitted bids."""
-    import requests
-
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not bot_token or not chat_id:
-        logger.debug("Telegram not configured, skipping notification")
+async def _consume_approved(logger):
+    from services.qqbot_service import QQBotConfig
+    from services.qqbot_store import QQBotStore
+    from services.approved_bids import submit_approved_bid
+    config = QQBotConfig.from_env()
+    if not config.target_id or not config.approvers:
         return
-
-    submitted = [r for r in bid_results if r.get("status") == "submitted"]
-    if not submitted:
-        return
-
-    lines = [f"🤖 *自动投标通知* ({len(submitted)} 个项目)\n"]
-    for r in submitted:
-        lines.append(
-            f"• *{r.get('title', '')[:50]}*\n"
-            f"  💰 {r['amount']:.0f} {r.get('currency', 'USD')} | ⏱ {r['period']}d\n"
-            f"  🔗 https://www.freelancer.com/projects/{r['project_id']}\n"
-        )
-
-    text = "\n".join(lines)
-    if len(text) > 4096:
-        text = text[:4090] + "\n..."
-
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        request_kwargs: Dict[str, Any] = {
-            "json": {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            },
-            "timeout": 15,
-        }
-        proxies = _build_telegram_proxies()
-        if proxies:
-            request_kwargs["proxies"] = proxies
-        resp = requests.post(url, **request_kwargs)
-        if resp.status_code == 200:
-            logger.info("Telegram notification sent for %d bids", len(submitted))
-        else:
-            logger.warning("Telegram API returned %d", resp.status_code)
-    except Exception as exc:
-        logger.warning("Failed to send Telegram notification: %s", exc)
+    store = QQBotStore(config.state_path)
+    for record in store.list_active():
+        if record['state'] != 'approved':
+            continue
+        try:
+            with common.get_db_context() as db:
+                await submit_approved_bid(db, record['id'], store)
+        except Exception as exc:
+            logger.error('Approved bid blocked (%s); no automatic retry of claimed outcomes', type(exc).__name__)
 
 
 def _step_generate_weekly_report(
@@ -623,7 +519,7 @@ def _step_generate_weekly_report(
 # Main cycle
 # ============================================================================
 
-async def run_cycle(
+async def _run_cycle(
     keywords: List[str],
     limit: int,
     since_days: int,
@@ -668,24 +564,23 @@ async def run_cycle(
 
     # Step 1: Fetch projects
     logger.info("── Step 1/4: Fetching projects ──")
-    fetched_ids = await _step_fetch(
-        keywords, limit, since_days, allowed_statuses, fixed_price_only, logger,
-    )
+    fetched_ids = await _observed_step("fetch", _step_fetch(
+        keywords, limit, since_days, allowed_statuses, fixed_price_only, logger))
     summary["fetched_projects"] = len(fetched_ids)
 
-    # Step 2: Fetch competitor bids
-    logger.info("── Step 2/4: Fetching competitor bids ──")
-    comp_bids = await _step_fetch_competitor_bids(
-        since_days, allowed_statuses, fixed_price_only, concurrency=10, logger=logger,
-    )
-    summary["competitor_bids_fetched"] = comp_bids
-
-    # Step 3: Score unscored projects
-    logger.info("── Step 3/4: Scoring projects ──")
-    scored = await _step_score(
-        since_days, allowed_statuses, fixed_price_only, batch_size=5, logger=logger,
-    )
+    # Score from search metadata first; full competitor context is only needed for
+    # viable top candidates, never for projects awaiting clarification or held by an operator.
+    logger.info("── Step 2/4: Scoring projects ──")
+    scored = await _observed_step("score", _step_score(
+        since_days, allowed_statuses, fixed_price_only, batch_size=5, logger=logger))
     summary["projects_scored"] = scored
+    candidates = select_bid_candidates(
+        since_days, allowed_statuses, bid_threshold, max_bids_per_cycle, fixed_price_only)
+    logger.info("── Step 3/4: Fetching competitor bids for viable candidates ──")
+    comp_bids = await _observed_step("competition", _step_fetch_competitor_bids(
+        since_days, allowed_statuses, fixed_price_only, concurrency=10, logger=logger,
+        project_ids={c["freelancer_id"] for c in candidates}))
+    summary["competitor_bids_fetched"] = comp_bids
 
     # Night mode: skip bidding, only collect candidates for later
     if skip_bid:
@@ -720,36 +615,9 @@ async def run_cycle(
                 c.get("currency_code", "USD"),
             )
 
-        # Telegram 人工确认环节（可选）
-        if confirm_enabled and not dry_run:
-            bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-            chat_id = os.getenv("TELEGRAM_CHAT_ID")
-            if bot_token and chat_id:
-                from telegram_confirm import TelegramConfirm
-
-                confirmer = TelegramConfirm(bot_token, chat_id, confirm_timeout)
-                try:
-                    msg_id = confirmer.send_candidates(candidates)
-                    candidates = confirmer.wait_for_decisions(msg_id, candidates)
-                except Exception as exc:
-                    logger.error("Telegram confirmation failed: %s", exc)
-                    candidates = []  # 安全默认：不投标
-
-                if not candidates:
-                    logger.info("No candidates approved, skipping bid")
-                    summary["bids_submitted"] = 0
-                    summary["bids_failed"] = 0
-                    summary["confirm_result"] = "none_approved"
-                    _attach_weekly_report()
-                    return summary
-                summary["confirm_result"] = f"{len(candidates)}_approved"
-            else:
-                logger.error("Confirmation required but Telegram is not configured; bidding blocked")
-                summary.update(bids_submitted=0, bids_failed=0, confirm_result="not_configured")
-                _attach_weekly_report()
-                return summary
-
-        bid_results = await _step_auto_bid(candidates, dry_run, logger)
+        bid_results = await _observed_step("preparation", _step_auto_bid(candidates, dry_run, logger,
+            replacement_selector=lambda: select_bid_candidates(
+                since_days, allowed_statuses, bid_threshold, max_bids_per_cycle, fixed_price_only)))
         summary["bids_submitted"] = sum(
             1 for r in bid_results if r.get("status") == "submitted"
         )
@@ -758,9 +626,6 @@ async def run_cycle(
             1 for r in bid_results if r.get("status") == "error"
         )
 
-        # 非确认模式下发送 Telegram 通知（确认模式下用户已知晓）
-        if not dry_run and not confirm_enabled:
-            _send_telegram_notification(bid_results, logger)
     else:
         logger.info("No qualifying candidates found (threshold=%.1f)", bid_threshold)
         summary["bids_submitted"] = 0
@@ -772,61 +637,60 @@ async def run_cycle(
     return summary
 
 
-async def _morning_batch_bid(
-    candidates: List[Dict[str, Any]],
-    dry_run: bool,
-    confirm_timeout: int,
-    logger: logging.Logger,
-    auto_approve: bool = False,
-) -> Dict[str, Any]:
-    """8:00 起床批次：将夜间积累的候选推送 Telegram 确认，等待用户决策后投标。"""
-    summary: Dict[str, Any] = {}
-    if not candidates:
-        logger.info("Morning batch: no night candidates to process")
-        summary["bids_submitted"] = 0
+from contextvars import ContextVar
+_CYCLE_STAGE = ContextVar("cycle_stage", default=None)
+_CYCLE_TIMINGS = ContextVar("cycle_timings", default=None)
+
+
+async def _observed_step(stage, operation):
+    _CYCLE_STAGE.set(stage)
+    started = time.monotonic()
+    try:
+        return await operation
+    finally:
+        timings = _CYCLE_TIMINGS.get()
+        if timings is not None:
+            timings[stage] = round((time.monotonic() - started) * 1000, 2)
+
+
+async def run_cycle(*args, **kwargs):
+    from services import workflow_service as workflow
+    from database.models import WorkflowRun
+    import uuid
+    identity = uuid.uuid4().hex
+    started = time.monotonic()
+    with common.get_db_context() as db:
+        db.add(WorkflowRun(id=identity, status="running"))
+        workflow.reconcile(db)
+    token = workflow.CURRENT_RUN.set(identity)
+    stage_token = _CYCLE_STAGE.set("fetch")
+    timing_token = _CYCLE_TIMINGS.set({})
+    summary = {}
+    failure = None
+    try:
+        summary = await _run_cycle(*args, **kwargs)
+        summary["run_id"] = identity
         return summary
-
-    logger.info("🌅 Morning batch: %d candidates accumulated overnight", len(candidates))
-
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not auto_approve and not dry_run and bot_token and chat_id:
+    except Exception as exc:
+        failure = exc
+        raise
+    finally:
+        summary["step_durations_ms"] = dict(_CYCLE_TIMINGS.get())
         try:
-            from telegram_confirm import TelegramConfirm
-
-            confirmer = TelegramConfirm(bot_token, chat_id, confirm_timeout)
-            msg_id = confirmer.send_candidates(candidates)
-            if not auto_approve:
-                candidates = confirmer.wait_for_decisions(msg_id, candidates)
-            logger.info(
-                "Morning batch: %d/%d candidates approved via Telegram",
-                len(candidates), len(candidates),
-            )
-        except Exception as exc:
-            logger.error(
-                "Morning batch Telegram confirmation failed: %s", exc,
-            )
-            candidates = []  # 安全默认：不投标
-    elif not auto_approve and not dry_run:
-        logger.error("Morning batch confirmation required but Telegram is not configured; bidding blocked")
-        candidates = []
-
-    if not candidates:
-        logger.info("Morning batch: no candidates approved, skipping bid")
-        summary["bids_submitted"] = 0
-        summary["bids_failed"] = 0
-        return summary
-
-    logger.info("Morning batch: bidding on %d approved candidates...", len(candidates))
-    bid_results = await _step_auto_bid(candidates, dry_run, logger)
-    summary["bids_submitted"] = sum(
-        1 for r in bid_results if r.get("status") == "submitted"
-    )
-    summary["bids_previewed"] = sum(1 for r in bid_results if r.get("status") == "dry_run")
-    summary["bids_failed"] = sum(
-        1 for r in bid_results if r.get("status") == "error"
-    )
-    return summary
+            with common.get_db_context() as db:
+                row = db.query(WorkflowRun).filter_by(id=identity).one()
+                from database.models import WorkflowEvent
+                partial = db.query(WorkflowEvent).filter_by(run_id=identity, outcome="failed").order_by(WorkflowEvent.id).first()
+                row.status = "failed" if failure else "completed_with_errors" if partial else "completed"
+                row.finished_at = workflow.now()
+                row.duration_ms = (time.monotonic()-started)*1000
+                row.summary = json.dumps(summary, ensure_ascii=False)
+                row.failed_stage = _CYCLE_STAGE.get() if failure else partial.stage if partial else None
+                row.error_type = type(failure).__name__ if failure else None
+        finally:
+            workflow.CURRENT_RUN.reset(token)
+            _CYCLE_STAGE.reset(stage_token)
+            _CYCLE_TIMINGS.reset(timing_token)
 
 
 # ============================================================================
@@ -834,14 +698,12 @@ async def _morning_batch_bid(
 # ============================================================================
 
 def main(argv=None) -> int:
-    global _night_candidates
-
     parser = argparse.ArgumentParser(
         description="Automated pipeline scheduler: fetch → score → bid.",
     )
     parser.add_argument(
-        "--interval", type=int, default=3,
-        help="Base minutes between cycles (default: 3, actual 3-6 with jitter)",
+        "--interval", type=int, default=30,
+        help="Base minutes between cycles (default: 30)",
     )
     parser.add_argument(
         "--keywords",
@@ -887,7 +749,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--confirm", action="store_true",
-        help="Enable Telegram manual confirmation before bidding (default: off)",
+        help="Compatibility flag: real bidding always requires QQ approval",
     )
     parser.add_argument(
         "--confirm-timeout", type=int, default=300,
@@ -961,12 +823,16 @@ def main(argv=None) -> int:
         print(f"Failed to load settings: {exc}")
         return common.EXIT_VALIDATION_ERROR
 
-    _promote_telegram_proxy_env(logger)
-    if args.confirm and not args.dry_run and not (
-        os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")
-    ):
-        logger.error("--confirm requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; bidding blocked")
-        return common.EXIT_VALIDATION_ERROR
+    if not args.dry_run:
+        from config import settings
+        if not settings.BID_SUBMISSION_ENABLED:
+            logger.error('Real bidding is disabled in configuration')
+            return common.EXIT_VALIDATION_ERROR
+        from services.qqbot_service import QQBotConfig
+        config = QQBotConfig.from_env()
+        if not config.target_id or not config.approvers:
+            logger.error('QQ target and approver OpenIDs must be configured')
+            return common.EXIT_VALIDATION_ERROR
 
     if not args.keep_proxy:
         for key in _PROXY_ENV_KEYS:
@@ -1003,123 +869,44 @@ def main(argv=None) -> int:
         f"max_bids={args.max_bids_per_cycle}, tz={tz_name}"
     )
 
-    cycle_count = 0
-    was_night = False  # 追踪上一个 cycle 是否为夜间
+    try:
+        return asyncio.run(_scheduler_loop(args, keywords, allowed_statuses, fixed_price_only, tz_name, logger))
+    except KeyboardInterrupt:
+        return 0
 
+
+async def _scheduler_loop(args, keywords, allowed_statuses, fixed_price_only, tz_name, logger):
+    cycle_count = 0
     while not _shutdown:
         cycle_count += 1
-        current_hour = _get_local_hour(tz_name)
-        night_mode = (
-            not args.no_night_mode
-            and _is_night(current_hour, args.night_start, args.night_end)
-        )
-
-        # 夜间即时竞标模式：夜间仍然竞标，只是降低频率
-        night_skip_bid = night_mode and not args.night_instant_bid
-
-        # ── 夜间 → 白天切换：触发 8:00 起床批次（仅在积累模式下生效） ──
-        if was_night and not night_mode and _night_candidates and not args.night_instant_bid:
-            logger.info(
-                "🌅 Night→Day transition at %02d:00, processing %d accumulated candidates",
-                current_hour, len(_night_candidates),
-            )
-            try:
-                batch_summary = asyncio.run(_morning_batch_bid(
-                    candidates=_night_candidates,
-                    dry_run=args.dry_run,
-                    confirm_timeout=args.confirm_timeout,
-                    logger=logger,
-                    auto_approve=not args.confirm,
-                ))
-                logger.info(
-                    "🌅 Morning batch done: %d bids submitted",
-                    batch_summary.get("bids_submitted", 0),
-                )
-            except Exception as exc:
-                logger.error("Morning batch failed: %s", exc, exc_info=True)
-            _night_candidates = []
-
-        was_night = night_mode
-        mode_tag = "🌙 NIGHT" if night_mode else "☀️ DAY"
-        logger.info(
-            "═══ Cycle %d [%s] started at %s (local %02d:00) ═══",
-            cycle_count, mode_tag, datetime.utcnow().isoformat(), current_hour,
-        )
-
+        night = not args.no_night_mode and _is_night(_get_local_hour(tz_name), args.night_start, args.night_end)
+        hold = night and not args.night_instant_bid
+        cycle_failed = False
         try:
-            summary = asyncio.run(run_cycle(
-                keywords=keywords,
-                limit=args.limit,
-                since_days=args.since_days,
-                allowed_statuses=allowed_statuses,
-                bid_threshold=args.bid_threshold,
-                max_bids_per_cycle=args.max_bids_per_cycle,
-                dry_run=args.dry_run,
-                fixed_price_only=fixed_price_only,
-                logger=logger,
-                confirm_enabled=args.confirm,
-                confirm_timeout=args.confirm_timeout,
-                skip_bid=night_skip_bid,
+            summary = await run_cycle(
+                keywords=keywords, limit=args.limit, since_days=args.since_days,
+                allowed_statuses=allowed_statuses, bid_threshold=args.bid_threshold,
+                max_bids_per_cycle=args.max_bids_per_cycle, dry_run=args.dry_run,
+                fixed_price_only=fixed_price_only, logger=logger, confirm_enabled=True,
+                confirm_timeout=args.confirm_timeout, skip_bid=hold,
                 weekly_report_enabled=args.weekly_report,
                 weekly_report_since_days=args.weekly_report_since_days,
                 weekly_report_output=args.weekly_report_output,
-                weekly_report_sync_awards=args.weekly_report_sync_awards,
-            ))
-
-            # 夜间模式：仅在积累模式下积累候选
-            if night_skip_bid:
-                new_candidates = summary.get("night_candidates", [])
-                if new_candidates:
-                    _night_candidates = _dedup_candidates(_night_candidates, new_candidates)
-                    logger.info(
-                        "🌙 Night: +%d candidates this cycle, %d total accumulated",
-                        len(new_candidates), len(_night_candidates),
-                    )
-
-            logger.info(
-                "═══ Cycle %d completed: fetched=%d scored=%d candidates=%d bids=%d (%.1fs) ═══",
-                cycle_count,
-                summary.get("fetched_projects", 0),
-                summary.get("projects_scored", 0),
-                summary.get("bid_candidates", 0),
-                summary.get("bids_submitted", 0),
-                summary.get("elapsed_seconds", 0),
-            )
-            print(
-                f"[Cycle {cycle_count} {mode_tag}] "
-                f"fetched={summary.get('fetched_projects', 0)} "
-                f"scored={summary.get('projects_scored', 0)} "
-                f"candidates={summary.get('bid_candidates', 0)} "
-                f"bids={summary.get('bids_submitted', 0)} "
-                f"({summary.get('elapsed_seconds', 0):.1f}s)"
-            )
+                weekly_report_sync_awards=args.weekly_report_sync_awards)
+            print(f"Cycle {cycle_count}: {summary}", flush=True)
         except Exception as exc:
-            logger.error("Cycle %d failed: %s", cycle_count, exc, exc_info=True)
-            print(f"[Cycle {cycle_count}] ERROR: {exc}")
-
+            cycle_failed = True
+            logger.error('Cycle failed (%s); no submission from this cycle', type(exc).__name__)
         if args.once:
-            break
-
-        # ── 计算下次间隔 ──
-        if night_mode:
-            # 夜间：较长间隔 (8-12 min)，降低频率但不错过新项目
-            base_seconds = 10 * 60
-            jitter = random.uniform(-0.2, 0.2) * base_seconds
-        else:
-            # 白天：5-10 min 随机间隔
-            base_seconds = args.interval * 60
-            jitter = random.uniform(0, 1.0) * base_seconds  # interval ~ 2*interval
-
-        sleep_seconds = max(60, int(base_seconds + jitter))
-        logger.info("Sleeping %d seconds until next cycle...", sleep_seconds)
-        for _ in range(sleep_seconds):
+            return 1 if cycle_failed else 0
+        # During the polling interval process only already-approved snapshots.
+        for second in range(max(60, args.interval*60)):
             if _shutdown:
                 break
-            time.sleep(1)
-
-    logger.info("Scheduler stopped after %d cycles", cycle_count)
-    print(f"Scheduler stopped after {cycle_count} cycles.")
-    return common.EXIT_SUCCESS
+            if not args.dry_run and not hold and second % 5 == 0:
+                await _consume_approved(logger)
+            await asyncio.sleep(1)
+    return 0
 
 
 if __name__ == "__main__":

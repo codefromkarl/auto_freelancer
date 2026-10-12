@@ -35,6 +35,8 @@ class Project(Base):
 
     ai_score = Column(Float)  # AI analysis score (0-10)
     ai_reason = Column(Text)  # AI analysis reason
+    score_metadata = Column(Text)  # JSON provenance, dimensions, economics and input version
+    scored_at = Column(DateTime, nullable=True)
     ai_proposal_draft = Column(Text)  # AI generated proposal
     suggested_bid = Column(DECIMAL(10, 2))  # AI suggested bid amount in USD
     estimated_hours = Column(Integer)  # AI estimated work hours
@@ -79,12 +81,67 @@ class Project(Base):
             "owner_info": safe_json_parse(self.owner_info),
             "ai_score": self.ai_score,
             "ai_reason": self.ai_reason,
+            "score_metadata": safe_json_parse(self.score_metadata),
+            "scored_at": self.scored_at.isoformat() if self.scored_at else None,
+            "type_id": self.type_id,
             "ai_proposal_draft": self.ai_proposal_draft,
             "suggested_bid": float(self.suggested_bid) if self.suggested_bid is not None else None,
             "estimated_hours": self.estimated_hours,
             "hourly_rate": self.hourly_rate,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class CandidateWorkflow(Base):
+    """Local work queue, separate from remote project and immutable approval states."""
+    __tablename__ = "candidate_workflows"
+
+    id = Column(Integer, primary_key=True)
+    project_freelancer_id = Column(Integer, ForeignKey("projects.freelancer_id"), unique=True, nullable=False)
+    state = Column(String(30), nullable=False, default="needs_evaluation", index=True)
+    reason_code = Column(String(60), nullable=False, default="new_project")
+    reason = Column(Text, nullable=False, default="等待范围与能力评估")
+    material_hash = Column(String(64), nullable=False)
+    questions = Column(Text, nullable=False, default="[]")
+    answers = Column(Text, nullable=False, default="[]")
+    held_by = Column(String(20), nullable=True)
+    resume_condition = Column(String(30), nullable=True)
+    resume_at = Column(DateTime, nullable=True)
+    approval_id = Column(String(32), nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    __mapper_args__ = {"version_id_col": revision}
+
+
+class WorkflowRun(Base):
+    __tablename__ = "workflow_runs"
+
+    id = Column(String(32), primary_key=True)
+    status = Column(String(20), nullable=False, default="running", index=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = Column(DateTime)
+    duration_ms = Column(Float)
+    summary = Column(Text)
+    failed_stage = Column(String(30))
+    error_type = Column(String(100))
+
+
+class WorkflowEvent(Base):
+    """Observed events/counts, not estimated conversion or billing figures."""
+    __tablename__ = "workflow_events"
+
+    id = Column(Integer, primary_key=True)
+    event_key = Column(String(100), unique=True, nullable=True)
+    run_id = Column(String(32), ForeignKey("workflow_runs.id"), nullable=True, index=True)
+    project_freelancer_id = Column(Integer, nullable=True, index=True)
+    stage = Column(String(30), nullable=False, index=True)
+    outcome = Column(String(40), nullable=False)
+    reason_code = Column(String(100))
+    count = Column(Integer, nullable=False, default=1)
+    duration_ms = Column(Float)
+    details = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class Bid(Base):
@@ -615,7 +672,7 @@ class ProjectKickoff(Base):
     template_type = Column(String(50))  # web_scraping, api_development, data_analysis, automation, custom
 
     # Notifications
-    notification_sent = Column(Boolean, default=False)  # Telegram notification
+    notification_sent = Column(Boolean, default=False)  # Notification delivery
     notification_sent_at = Column(DateTime)
     client_email_sent = Column(Boolean, default=False)  # Client welcome email
     client_email_sent_at = Column(DateTime)

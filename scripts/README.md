@@ -17,9 +17,7 @@
 - `debug_budget.py`: 调试 API 预算数据。
 
 ### 3. `tests/` (测试脚本)
-包含用于验证第三方服务（如 Telegram, Freelancer API）连通性和功能的小型测试脚本。
-- `test_telegram.py`: 测试机器人基础连通性。
-- `test_telegram_link.py`: 测试富文本消息和内联按钮。
+包含用于验证 Freelancer API 及流水线行为的测试脚本。QQ Bot 协议、审批与签名测试在 `python_service/tests/qqbot_test.py`；真实连接检查使用 `manual_pipeline/run_qqbot.py --once-ready`。
 - `test_freelancer_detail.py`: 测试 SDK 获取项目详情。
 
 ## 注意事项

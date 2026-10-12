@@ -45,6 +45,13 @@ export default function RootLayout({
                   <span>仪表盘</span>
                 </Link>
                 <Link
+                  href="/workflow"
+                  className="flex items-center gap-3 px-3 py-2 text-gray-700 hover:bg-blue-50 hover:text-blue-600 rounded-md transition-colors"
+                >
+                  <List size={20} />
+                  <span>候选处理</span>
+                </Link>
+                <Link
                   href="/projects"
                   className="flex items-center gap-3 px-3 py-2 text-gray-700 hover:bg-blue-50 hover:text-blue-600 rounded-md transition-colors"
                 >

@@ -586,8 +586,7 @@ class TestValidatorIntegration:
     async def test_validation_failure_returns_error_instead_of_partial_success(
         self, sample_project, mock_llm_client, proposal_config
     ):
-        """After exhausting retries, the service now bids with the imperfect proposal
-        (success=True, validation_passed=False) to avoid missing opportunities."""
+        """Exhausted quality checks must not report an invalid draft as successful."""
 
         class AlwaysInvalidValidator:
             def validate(self, proposal, project):
@@ -618,11 +617,11 @@ class TestValidatorIntegration:
 
         result = await service.generate_proposal(sample_project)
 
-        # New behavior: bid with imperfect proposal after exhausting retries
-        assert result["success"] is True
+        assert result["success"] is False
         assert result["validation_passed"] is False
         assert result["attempts"] == 2
-        assert result["error"] is None
+        assert result['proposal'] == ''
+        assert result["error"] == 'proposal_validation_failed'
         assert "mock validation failure" in result["validation_issues"]
 
 

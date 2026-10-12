@@ -20,7 +20,8 @@ def local_reads(monkeypatch):
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         project = Project(freelancer_id=123, title="Cached Python API project", status="active",
-                          budget_minimum=100, budget_maximum=500, currency_code="USD")
+                          full_description="Build a Python API integration with acceptance tests",
+                          budget_minimum=100, budget_maximum=500, currency_code="USD", type_id=1)
         db.add(project)
         db.flush()
         db.add(MessageThread(freelancer_thread_id=42, project_id=project.id,
@@ -84,16 +85,37 @@ def test_messages_serialize_and_persist_read_state(local_reads):
         assert db.query(Message).one().is_read is True
 
 
-def test_cached_project_with_nullable_metadata_scores_and_persists(local_reads):
+def test_cached_project_with_nullable_metadata_scores_and_persists(local_reads, monkeypatch):
     client, remote, engine = local_reads
+    from services.llm_scoring_service import LLMScoringService, LLMScoringConfig, LLMProviderConfig
+    from services.scoring_policy import DIMENSIONS
+    from types import SimpleNamespace
+    service = LLMScoringService(LLMScoringConfig(
+        providers=[LLMProviderConfig(name="openai", api_key="test")], cache_enabled=False))
+    monkeypatch.setattr(service, "_create_provider_client", lambda _: (SimpleNamespace(close=AsyncMock()), object()))
+    monkeypatch.setattr(service, "_score_with_providers", AsyncMock(return_value=(True, {
+        "dimension_scores": {k: 8 for k in DIMENSIONS}, "reason": "Known scope, unknown client",
+        "suggested_bid": 300, "estimated_hours": 10, "provider_model": "fixture"})))
+    monkeypatch.setattr(projects, "get_scoring_service", lambda: service)
     response = client.post("/api/v1/projects/123/score", headers={"X-API-Key": "test-api-key"})
     assert response.status_code == 200
     data = response.json()["data"]
     assert 0 <= data["ai_score"] <= 10
     assert data["estimated_hours"] > 0
-    assert data["hourly_rate"] > 0
+    assert data["hourly_rate"] == 30
+    assert data["score_metadata"]["source"] == "llm"
+    assert data["score_metadata"]["unknown"] == ["customer", "competition", "publication_time"]
     remote.assert_not_called()
     with Session(engine) as db:
         row = db.query(Project).one()
         assert row.ai_score == data["ai_score"]
         assert row.hourly_rate == data["hourly_rate"]
+
+
+def test_web_scoring_never_falls_back_when_no_provider(local_reads, monkeypatch):
+    from types import SimpleNamespace
+    client, _, _ = local_reads
+    monkeypatch.setattr(projects, 'get_scoring_service', lambda: SimpleNamespace(
+        score_projects_concurrent=AsyncMock(return_value=(0, 1, 0, None))))
+    result = client.post('/api/v1/projects/123/score', headers={'X-API-Key': 'test-api-key'})
+    assert result.status_code == 422

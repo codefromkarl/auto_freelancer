@@ -46,6 +46,10 @@ def _migrate_add_columns(eng):
     insp = inspect(eng)
     if "projects" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("projects")}
+        for name, sql_type in (("score_metadata", "TEXT"), ("scored_at", "DATETIME")):
+            if name not in cols:
+                with eng.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE projects ADD COLUMN {name} {sql_type}"))
         if "competitor_bids_fetched_at" not in cols:
             with eng.begin() as conn:
                 conn.execute(text(

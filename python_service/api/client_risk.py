@@ -4,7 +4,7 @@ Client Risk API endpoints (方向四：客户尽职调查与风控盾).
 提供以下功能：
 - 客户风控评估入口 (POST /assess)
 - 查询客户风控历史 (GET /{user_id})
-- 格式化 Telegram 报告 (GET /telegram-report/{assessment_id})
+- 格式化通知报告 (GET /notification-report/{assessment_id})
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional, List, Any
@@ -191,15 +191,15 @@ async def get_client_risk_history(
         raise HTTPException(status_code=500, detail=f"Failed to fetch risk history: {str(e)}")
 
 
-@router.get("/telegram-report/{assessment_id}")
-async def get_telegram_risk_report(
+@router.get("/notification-report/{assessment_id}")
+async def get_notification_risk_report(
     assessment_id: int,
     db: Session = Depends(get_db)
 ):
     """
-    生成 Telegram 格式的风控报告。
+    生成通知文本格式的风控报告。
 
-    返回格式化的文本，可直接发送到 Telegram Bot。
+    返回格式化的文本，供 QQ Bot 等接收端展示。
     """
     try:
         # 查询风控评估记录
@@ -267,7 +267,7 @@ async def get_telegram_risk_report(
         else:
             recommendation = "✅ 可投标"
 
-        # 构建 Telegram 消息
+        # 构建通知消息
         report_lines = [
             "🛡️ <b>客户风控报告</b>",
             "",

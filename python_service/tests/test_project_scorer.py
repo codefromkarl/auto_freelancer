@@ -41,31 +41,15 @@ def test_budget_efficiency_bid_oriented():
     # Case 2: $100/h -> High risk ($80+) -> Score should be <= 6.0
     # 1000 / 10 = 100.
     score, _ = scorer.score_budget_efficiency(project, estimated_hours=10)
-    assert score <= 6.0
+    assert score == 10.0  # High net earnings are not an inferred low win probability.
 
 
-def test_competition_scoring_with_bonus():
+def test_competition_scoring_is_continuous_and_age_sensitive():
     scorer = ProjectScorer()
-    # Optimal bid count (5-20) -> Base 10.0
-    project = {
-        "bid_stats": {"bid_count": 10},
-        "submitdate": time.time(), # Recent
-    }
-    score = scorer.score_competition(project)
-    assert score == 10.0 # Clamped to 10
-
-    # High bid count (21-40) -> Base 6.0 + 1.0 bonus = 7.0
-    project_with_bonus = {
-        "bid_stats": {"bid_count": 30},
-        "submitdate": time.time(),
-    }
-    score = scorer.score_competition(project_with_bonus)
-    assert score == 7.0
-
-    # High bid count (21-40) -> Base 6.0, no bonus
-    project_no_bonus = {
-        "bid_stats": {"bid_count": 30},
-        "submitdate": time.time() - 48 * 3600, # 48h ago
-    }
-    score = scorer.score_competition(project_no_bonus)
-    assert score == 6.0
+    values = [scorer.score_competition({"bid_stats": {"bid_count": n}}) for n in (0, 4, 5, 20, 21, 41)]
+    assert values == sorted(values, reverse=True)
+    assert abs(values[1] - values[2]) < 1
+    assert scorer.score_competition({}) == 5
+    fresh = {"bid_stats": {"bid_count": 30}, "submitdate": time.time()}
+    old = {**fresh, "submitdate": time.time() - 48 * 3600}
+    assert scorer.score_competition(fresh) > scorer.score_competition(old)

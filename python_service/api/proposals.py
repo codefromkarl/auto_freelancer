@@ -13,6 +13,38 @@ from services.freelancer_client import FreelancerAPIError
 router = APIRouter()
 
 
+class EvaluateProposalRequest(BaseModel):
+    project_id: int = Field(gt=0)
+    amount: float = Field(gt=0)
+    amount_currency: Optional[str] = Field(None, pattern=r'^[A-Z]{3}$')
+    period: int = Field(ge=1, le=365)
+    description: str = Field(min_length=10, max_length=5000)
+
+
+@router.post('/evaluate')
+async def evaluate_proposal(request: EvaluateProposalRequest, db: Session = Depends(get_db)):
+    from database.models import Project
+    from services import bid_service
+    from services.approved_bids import validate_terms
+    from services.proposal_competition import ensure_competitor_context, evaluate_proposal_competition
+    project = db.query(Project).filter_by(freelancer_id=request.project_id).first()
+    if project is None:
+        raise HTTPException(404,'Project not found')
+    try:
+        amount = bid_service._resolve_submission_amount(project,request.amount,request.amount_currency)
+        validate_terms(project,amount,request.period)
+        context = await ensure_competitor_context(db,project)
+        review = evaluate_proposal_competition(project.to_dict(),request.description,amount,request.period,context)
+        valid,reason = bid_service.check_content_risk(request.description,project,amount)
+        if not valid:
+            review['status'] = 'blocked'
+            review['blocking_issues'].append(reason)
+        return {'status':'success','data':{**review,'content_validation_passed':valid,
+            'content_issues':[] if valid else [reason]}}
+    except ValueError as exc:
+        raise HTTPException(400,str(exc))
+
+
 # Pydantic models
 class CreateProposalRequest(BaseModel):
     """Request model for creating a proposal (bid)."""
@@ -21,6 +53,7 @@ class CreateProposalRequest(BaseModel):
     amount_currency: Optional[str] = Field(None, pattern=r"^[A-Z]{3}$")
     period: int = Field(default=7, ge=1, le=365)
     description: Optional[str] = Field(None, min_length=10, max_length=5000)
+    approval_id: Optional[str] = None
 
 
 class UpdateProposalRequest(BaseModel):
@@ -133,14 +166,12 @@ async def create_proposal(
     Create a new proposal (bid).
     """
     try:
-        bid_data = await bid_service.create_bid(
-            db,
-            request.project_id,
-            request.amount,
-            request.period,
-            request.description,
-            amount_currency=request.amount_currency,
-        )
+        from services.approved_bids import submit_approved_bid, check_request
+        if not request.approval_id:
+            raise ValueError('Prepare and approve the final bid snapshot through QQ Bot first')
+        check_request(request.approval_id, request.project_id, request.amount, request.period,
+                      request.description, request.amount_currency)
+        bid_data = await submit_approved_bid(db, request.approval_id)
         return APIResponse(status="success", data=bid_data)
 
     except ValueError as e:
