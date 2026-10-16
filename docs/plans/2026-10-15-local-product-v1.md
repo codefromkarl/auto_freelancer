@@ -48,4 +48,6 @@
 - 全量Python 367 passed（原329项加本地产品38项），无真实外部HTTP；原有弃用提示保留。Ruff新模块F检查、Python编译、JS语法、YAML原生矩阵和diff检查通过。
 - 本地界面13项主流程浏览器检查、网站4项检查通过，桌面与390px移动布局已实际查看；另外两项控件检查覆盖旧评估失效后的生成禁用、未保存连接不能发起访问测试。UI使用明确的模型/凭证替身，不冒充原生凭证或真实客户验收。
 - 本机已构建并运行Linux独立可执行预览，验证无预装Python/Node入口、含空格/非ASCII/井号的数据目录、首次启动、导入、安全退出及重启保留。模型/平台请求0；native_vault=false，明确不作为Windows/macOS证据。
-- 源码与流程可写回；CI尚未提交/推送/触发，Windows/macOS包及本地凭证后端的原生验收没有运行。正式签名/公证、商户订单webhook、公共域名发布及真实客户推广仍未完成，不能宣布全部任务完成。
+- 源码已在隔离分支`feat/byok-desktop-v1`本地提交；推送被GitHub拒绝，原因是当前OAuth登录缺少`workflow` scope。产品所有者运行`env -u GITHUB_TOKEN -u GH_TOKEN gh auth refresh -h github.com -s workflow`补充授权后，执行方继续推送、Draft PR和三个原生CI作业。不改用其他凭证绕过该拒绝。
+- 提交准备修复了仓库`test_*.py`忽略规则造成的遗漏：三个桌面测试改为项目惯用的`*_test.py`并进入提交。2026-10-16全量重新检查367 passed；个人运行记录文档未加入公开分支。
+- Windows/macOS包及本地凭证后端的原生验收没有运行。正式签名/公证、商户订单webhook、公共域名发布及真实客户推广仍未完成，不能宣布全部任务完成。
