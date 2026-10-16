@@ -60,12 +60,13 @@ class QQBotStore:
         now = time.time()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT * FROM approvals WHERE digest=? AND state IN ('pending','approved') AND expires_at>?",
+            row = db.execute("SELECT * FROM approvals WHERE digest=? AND state IN ('pending','approved','auto_pending','auto_authorized') AND expires_at>?",
                              (digest, now)).fetchone()
             if not row:
                 identity = secrets.token_hex(8)
                 db.execute('INSERT INTO approvals(id,project_id,payload,digest,state,expires_at,created_at) VALUES (?,?,?,?,?,?,?)',
-                    (identity, payload['project_id'], json.dumps(payload, ensure_ascii=False), digest, 'pending', now+ttl, now))
+                    (identity, payload['project_id'], json.dumps(payload, ensure_ascii=False), digest,
+                     'auto_pending' if payload.get('authorization', {}).get('mode') == 'automatic' else 'pending', now+ttl, now))
                 row = db.execute('SELECT * FROM approvals WHERE id=?', (identity,)).fetchone()
             result = dict(row)
             result['payload'] = json.loads(result['payload'])
@@ -92,7 +93,7 @@ class QQBotStore:
 
     def list_active(self, limit=100) -> list[dict]:
         with self.connect() as db:
-            rows = db.execute("SELECT id FROM approvals WHERE state IN ('pending','approved') AND expires_at>? ORDER BY created_at DESC LIMIT ?",
+            rows = db.execute("SELECT id FROM approvals WHERE state IN ('pending','approved','auto_pending','auto_authorized') AND expires_at>? ORDER BY created_at DESC LIMIT ?",
                               (time.time(), limit)).fetchall()
         return [self.get(row['id']) for row in rows]
 
@@ -114,14 +115,32 @@ class QQBotStore:
             db.execute('UPDATE approvals SET state=?,actor=?,scope=?,target=?,risk_reviewed=? WHERE id=?',
                 ('approved' if approve else 'rejected', actor, scope, target, int(risk_reviewed), identity))
 
-    def claim(self, identity: str, daily_limit: int) -> dict:
+    def authorize_automatic(self, identity: str, policy_hash: str) -> dict:
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM approvals WHERE id=?', (identity,)).fetchone()
+            if row is None or row['state'] != 'auto_pending' or row['expires_at'] <= time.time():
+                raise ValueError('Current automatic snapshot required')
+            payload = json.loads(row['payload'])
+            if canonical_hash(payload) != row['digest']:
+                raise ValueError('Automatic snapshot content was modified')
+            auth = payload.get('authorization') or {}
+            if (auth.get('mode') != 'automatic' or auth.get('source') != 'automatic_policy'
+                    or auth.get('policy_hash') != policy_hash):
+                raise ValueError('Automatic policy version mismatch')
+            db.execute("UPDATE approvals SET state='auto_authorized',actor='automatic_policy',scope='automatic',target=? WHERE id=?",
+                       (payload['account_id'], identity))
+        return self.get(identity)
+
+    def claim(self, identity: str, daily_limit: int, *, automatic=False) -> dict:
         if daily_limit < 0:
             raise ValueError('Daily bid limit must be zero (unlimited) or positive')
         day = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM approvals WHERE id=?', (identity,)).fetchone()
-            if row is None or row['state'] != 'approved' or row['expires_at'] <= time.time():
+            expected_state = 'auto_authorized' if automatic else 'approved'
+            if row is None or row['state'] != expected_state or row['expires_at'] <= time.time():
                 raise ValueError('A current, approved snapshot is required')
             if not secrets.compare_digest(canonical_hash(json.loads(row['payload'])), row['digest']):
                 raise ValueError('Approval snapshot content was modified')
@@ -136,14 +155,19 @@ class QQBotStore:
         if state not in {'submitted', 'blocked', 'outcome_unknown'}:
             raise ValueError('Invalid terminal approval state')
         with self.connect() as db:
-            db.execute("UPDATE approvals SET state=?,error=? WHERE id=? AND state='claimed'", (state, error, identity))
+            states = ('claimed', 'auto_pending', 'auto_authorized') if state == 'blocked' else ('claimed',)
+            placeholders = ','.join('?' for _ in states)
+            db.execute(f"UPDATE approvals SET state=?,error=? WHERE id=? AND state IN ({placeholders})",
+                       (state, error, identity, *states))
 
     def score_allowance(self, requested: int, limit: int) -> int:
+        if requested < 0 or limit < 0:
+            raise ValueError('Scoring counts must be nonnegative; zero limit means unlimited')
         day = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute("SELECT count FROM usage WHERE day=? AND kind='scores'", (day,)).fetchone()
-            allowed = max(0, min(requested, limit-(row['count'] if row else 0)))
+            allowed = requested if limit == 0 else max(0, min(requested, limit-(row['count'] if row else 0)))
             db.execute("INSERT INTO usage(day,kind,count) VALUES (?,'scores',?) ON CONFLICT(day,kind) DO UPDATE SET count=count+excluded.count", (day, allowed))
             return allowed
 

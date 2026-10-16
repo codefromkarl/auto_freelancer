@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>BidMaster Local</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/">BidMaster <span>Local</span></a>
+      <div id="connection" class="pill">Connecting…</div>
+    </header>
+    <main>
+      <div class="intro">
+        <div>
+          <h1>A clearer path from brief to proposal.</h1>
+          <p>
+            Review the scope, protect your time, and write an offer you can
+            stand behind.
+          </p>
+        </div>
+        <div class="queue-controls">
+          <button id="pause" class="secondary">Pause queue</button
+          ><button id="quit" class="quiet">Quit safely</button>
+        </div>
+      </div>
+      <div id="notice" role="status" aria-live="polite" hidden></div>
+      <div id="welcome" class="banner" hidden>
+        Open this interface from the BidMaster launcher to authorize this
+        browser session. Your model key is never used as the local session key.
+      </div>
+      <nav aria-label="Workspace">
+        <button data-tab="setup" class="selected">1. Set up</button
+        ><button data-tab="projects">2. Projects</button
+        ><button data-tab="runs">3. Activity</button>
+      </nav>
+      <section id="setup" class="tab">
+        <div class="columns">
+          <div class="stack">
+            <section class="panel">
+              <h2>Your model connection</h2>
+              <p>
+                Your key is stored in the OS credential vault. V1 supports
+                OpenAI-compatible HTTPS APIs. Requests go directly to your
+                selected endpoint, not through BidMaster servers.
+              </p>
+              <form id="provider-form">
+                <label
+                  >OpenAI-compatible API endpoint<input
+                    name="endpoint"
+                    type="url"
+                    required
+                    value="https://api.openai.com/v1"
+                    autocomplete="off" /></label
+                ><label
+                  >Exact model ID<input
+                    name="model"
+                    required
+                    maxlength="150"
+                    placeholder="Enter a model available to your account"
+                    autocomplete="off" /></label
+                ><label
+                  >API key<input
+                    name="key"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="Enter a key, or leave empty to keep the saved key"
+                /></label>
+                <div class="actions">
+                  <button>Save connection</button
+                  ><button type="button" id="test-provider" class="secondary">
+                    Check access</button
+                  ><button type="button" id="clear-provider" class="quiet">
+                    Remove saved key
+                  </button>
+                </div>
+                <p class="hint">
+                  Check access lists available models; it does not generate
+                  text. Provider requests may be counted by your provider.
+                  Saving alone makes no request.
+                </p>
+              </form>
+              <p id="vault-status" class="hint"></p>
+            </section>
+            <section class="panel">
+              <h2>Your working profile</h2>
+              <p>
+                Only the background you provide can support experience claims in
+                your proposals.
+              </p>
+              <form id="profile-form">
+                <label
+                  >Name<input
+                    name="name"
+                    maxlength="100"
+                    autocomplete="name" /></label
+                ><label
+                  >Skills, separated by commas<input
+                    name="skills"
+                    required
+                    placeholder="Python, FastAPI, data cleaning" /></label
+                ><label
+                  >Background and verified examples<textarea
+                    name="background"
+                    rows="4"
+                    maxlength="6000"
+                    placeholder="Describe work you have actually done. Do not paste passwords or client secrets."
+                  ></textarea>
+                </label>
+                <div class="fields">
+                  <label
+                    >Minimum net USD/hour<input
+                      name="rate"
+                      type="number"
+                      min="1"
+                      max="1000"
+                      step="0.5"
+                      required
+                      value="15" /></label
+                  ><label
+                    >Maximum project USD<input
+                      name="amount"
+                      type="number"
+                      min="1"
+                      max="100000"
+                      required
+                      value="1000" /></label
+                  ><label
+                    >Maximum hours<input
+                      name="hours"
+                      type="number"
+                      min="1"
+                      max="2000"
+                      required
+                      value="40" /></label
+                  ><label
+                    >Daily model tasks<input
+                      name="daily"
+                      type="number"
+                      min="1"
+                      max="1000"
+                      required
+                      value="50"
+                  /></label>
+                </div>
+                <button>Save profile</button>
+                <p class="hint">
+                  Limits reset at 00:00 UTC. A task may make multiple bounded
+                  model requests for quality checks. This is not a monetary
+                  spending cap.
+                </p>
+              </form>
+            </section>
+          </div>
+          <aside class="stack">
+            <section class="panel">
+              <h2>Software license</h2>
+              <p id="license-status">Checking license…</p>
+              <label
+                >Installation ID<input
+                  id="installation"
+                  readonly
+                  aria-label="Installation ID"
+              /></label>
+              <details>
+                <summary>
+                  Import a signed license or permission document
+                </summary>
+                <form id="license-form">
+                  <label
+                    >Document JSON<textarea
+                      name="document"
+                      rows="6"
+                      required
+                      spellcheck="false"
+                      placeholder="Paste the signed document supplied by the publisher"
+                    ></textarea></label
+                  ><button>Import document</button>
+                </form>
+              </details>
+              <p class="hint">
+                The software license does not include model usage, platform
+                fees, or platform automation permission. Expiry does not delete
+                your projects or receipts.
+              </p>
+            </section>
+            <section class="panel">
+              <h2>Platform connection</h2>
+              <p id="platform-permission">
+                Access is locked until written platform permission has been
+                verified separately.
+              </p>
+              <details>
+                <summary>Account and execution settings</summary>
+                <form id="account-form">
+                  <label
+                    >Your Freelancer account ID<input
+                      name="account"
+                      type="number"
+                      min="1"
+                      required /></label
+                  ><label
+                    >Your platform token<input
+                      name="token"
+                      type="password"
+                      autocomplete="new-password"
+                      placeholder="Stored only in the OS credential vault"
+                  /></label>
+                  <div class="actions">
+                    <button>Save account</button
+                    ><button
+                      type="button"
+                      id="disconnect-account"
+                      class="quiet"
+                    >
+                      Disconnect account
+                    </button>
+                  </div>
+                </form>
+                <label
+                  >Worker mode<select id="platform-mode">
+                    <option value="preview">Preview only</option>
+                    <option value="automatic">
+                      Controlled automatic submission
+                    </option>
+                  </select></label
+                ><label class="check"
+                  ><input id="platform-consent" type="checkbox" />I authorize
+                  model requests and the selected mode for my own
+                  account.</label
+                >
+                <div class="actions">
+                  <button id="start-platform">Start worker</button
+                  ><button id="stop-platform" class="secondary">
+                    Stop safely
+                  </button>
+                </div>
+                <p id="worker-status" class="hint">Not running</p>
+              </details>
+            </section>
+            <section class="panel">
+              <h2>Verified updates</h2>
+              <p>
+                Only newer, signed releases for this device can be downloaded.
+                BidMaster never replaces a running task.
+              </p>
+              <details>
+                <summary>Import signed release information</summary>
+                <form id="update-form">
+                  <label
+                    >Release JSON<textarea
+                      name="document"
+                      rows="5"
+                      required
+                      spellcheck="false"
+                    ></textarea></label
+                  ><button>Verify and download</button>
+                </form>
+              </details>
+            </section>
+            <section class="panel subtle">
+              <h2>Your data stays under your control</h2>
+              <p>
+                Cloud models receive the briefs and background needed for a
+                request. No telemetry or credential relay is enabled.
+              </p>
+              <div class="actions">
+                <button id="diagnostics" class="secondary">
+                  Export safe diagnostics</button
+                ><button id="backup" class="secondary">
+                  Create local backup
+                </button>
+              </div>
+              <p id="data-location" class="hint"></p>
+              <p class="hint">
+                An old database backup must not replace a newer submission
+                ledger without reconciling all later bids.
+              </p>
+            </section>
+          </aside>
+        </div>
+      </section>
+      <section id="projects" class="tab" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Your project workbench</h2>
+            <p>
+              Import a brief you have permission to use. Importing does not
+              contact a model or a platform.
+            </p>
+          </div>
+          <button id="open-import">Add a project</button>
+        </div>
+        <form id="import-form" class="panel" hidden>
+          <label
+            >Project title<input
+              name="title"
+              required
+              minlength="5"
+              maxlength="500" /></label
+          ><label
+            >Complete project brief<textarea
+              name="description"
+              rows="6"
+              required
+              minlength="30"
+              maxlength="20000"
+            ></textarea>
+          </label>
+          <div class="fields">
+            <label
+              >Minimum budget (USD)<input
+                name="minimum"
+                type="number"
+                min="1"
+                max="1000000"
+                step="0.01"
+                required /></label
+            ><label
+              >Maximum budget (USD)<input
+                name="maximum"
+                type="number"
+                min="1"
+                max="1000000"
+                step="0.01"
+                required
+            /></label>
+          </div>
+          <div class="actions">
+            <button>Save project</button
+            ><button type="button" id="close-import" class="quiet">
+              Cancel
+            </button>
+          </div>
+        </form>
+        <p id="empty-projects" class="empty">
+          No projects yet. Add one complete brief to begin.
+        </p>
+        <div id="project-list" class="stack"></div>
+      </section>
+      <section id="runs" class="tab" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Activity, without guesswork</h2>
+            <p>
+              A task result is not a platform submission or a promise of
+              winning.
+            </p>
+          </div>
+          <button id="refresh" class="secondary">Refresh</button>
+        </div>
+        <div id="job-list" class="stack"></div>
+      </section>
+    </main>
+    <footer>
+      <span>BidMaster Local <span id="version"></span></span
+      ><span
+        >Background work requires this device to stay awake and connected.</span
+      >
+    </footer>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

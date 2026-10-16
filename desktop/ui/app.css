@@ -1,0 +1,369 @@
+:root {
+  font:
+    15px/1.55 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  color: #16243c;
+  background: #f5f7fa;
+  --blue: #244ce5;
+  --line: #dce2ea;
+  --muted: #56657a;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+header,
+main,
+footer {
+  max-width: 1200px;
+  margin: auto;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 23px 28px;
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  font-size: 21px;
+  font-weight: 750;
+  text-decoration: none;
+  color: #14223b;
+  letter-spacing: -0.6px;
+}
+.brand span {
+  font-weight: 450;
+  color: var(--muted);
+  margin-left: 6px;
+}
+.pill {
+  font-size: 13px;
+  background: #e8edf5;
+  border-radius: 30px;
+  padding: 5px 12px;
+}
+.pill.ready {
+  color: #18603e;
+  background: #e4f2e9;
+}
+.intro {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 38px 0 26px;
+  align-items: center;
+}
+.eyebrow {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 1.4px;
+  margin: 0 0 10px;
+}
+h1 {
+  font-size: 30px;
+  line-height: 1.2;
+  letter-spacing: -0.9px;
+  margin: 0 0 12px;
+  max-width: 660px;
+}
+h2 {
+  font-size: 18px;
+  line-height: 1.35;
+  margin: 0 0 8px;
+  letter-spacing: -0.25px;
+}
+h3 {
+  font-size: 17px;
+  margin: 0 0 8px;
+}
+p {
+  color: var(--muted);
+  margin: 0 0 17px;
+}
+main {
+  padding: 0 28px 40px;
+}
+nav {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 24px;
+}
+nav button {
+  background: none;
+  color: var(--muted);
+  border: 0;
+  border-radius: 0;
+  padding: 14px 20px;
+  border-bottom: 3px solid transparent;
+}
+nav button.selected {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+button {
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  border: 1px solid var(--blue);
+  border-radius: 6px;
+  background: var(--blue);
+  color: white;
+  padding: 9px 15px;
+  min-height: 40px;
+}
+button:hover {
+  filter: brightness(0.95);
+}
+button.secondary {
+  background: white;
+  border-color: #c5cfdd;
+  color: #243b60;
+}
+button.quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 3px solid #92a9ff;
+  outline-offset: 3px;
+}
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(310px, 1fr);
+  gap: 24px;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.panel {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 24px;
+}
+.panel.subtle {
+  background: #eef2f7;
+}
+.fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 16px;
+}
+label {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+  margin: 16px 0;
+}
+input,
+textarea,
+select {
+  font: inherit;
+  font-size: 14px;
+  display: block;
+  width: 100%;
+  padding: 10px 11px;
+  margin-top: 6px;
+  border: 1px solid #bdc9d9;
+  border-radius: 5px;
+  color: #16243c;
+  background: white;
+}
+input[readonly] {
+  background: #f0f3f7;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+textarea {
+  resize: vertical;
+  min-height: 84px;
+}
+.actions,
+.queue-controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.hint {
+  font-size: 12px;
+  line-height: 1.65;
+  margin: 12px 0 0;
+  overflow-wrap: anywhere;
+}
+details {
+  margin-top: 18px;
+}
+summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--blue);
+}
+.check {
+  display: flex;
+  gap: 10px;
+  align-items: start;
+  font-weight: 450;
+}
+.check input {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin-top: 4px;
+}
+#notice,
+.banner {
+  padding: 14px 18px;
+  border-radius: 6px;
+  background: #eaf0ff;
+  color: #203d93;
+  margin-bottom: 18px;
+}
+#notice.error {
+  background: #fff2df;
+  color: #7a4b06;
+}
+.section-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 8px 0 18px;
+}
+.empty {
+  text-align: center;
+  padding: 60px 20px;
+  border: 1px dashed #c3cedc;
+  border-radius: 9px;
+}
+.metrics {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  margin: 18px 0;
+}
+.metrics div {
+  font-size: 12px;
+  color: var(--muted);
+}
+.metrics strong {
+  display: block;
+  font-size: 21px;
+  color: #192d50;
+  font-weight: 650;
+}
+.proposal {
+  white-space: pre-wrap;
+  font-size: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  margin-top: 18px;
+  color: #223653;
+}
+.badge {
+  display: inline-block;
+  border-radius: 4px;
+  background: #edf1f7;
+  font-size: 12px;
+  padding: 3px 8px;
+  margin-bottom: 10px;
+}
+.badge.succeeded {
+  background: #e5f3eb;
+  color: #216444;
+}
+.badge.failed,
+.badge.interrupted {
+  background: #fff0d9;
+  color: #845500;
+}
+.error-text {
+  color: #845500;
+}
+.job-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+footer {
+  padding: 20px 28px 28px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 760px) {
+  header {
+    padding: 18px;
+  }
+  main {
+    padding: 0 18px 28px;
+  }
+  .intro {
+    padding: 25px 0 18px;
+    display: block;
+  }
+  h1 {
+    font-size: 26px;
+  }
+  .queue-controls {
+    margin-top: 18px;
+  }
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .panel {
+    padding: 19px;
+  }
+  nav button {
+    padding: 12px 14px;
+  }
+  .section-head {
+    display: block;
+  }
+  .section-head > button {
+    margin-bottom: 12px;
+  }
+  .fields {
+    grid-template-columns: 1fr 1fr;
+  }
+  footer {
+    padding: 20px 18px;
+    display: block;
+  }
+  footer span {
+    display: block;
+    margin-bottom: 7px;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  button {
+    transition:
+      background 0.12s,
+      filter 0.12s;
+  }
+}

@@ -52,7 +52,7 @@ def test_step_generate_weekly_report_invokes_report_script(monkeypatch, tmp_path
 
     assert generated == str(output_file)
     assert captured["cmd"][0] == sys.executable
-    assert captured["cmd"][1].endswith("scripts/utils/bid_outcome_weekly_report.py")
+    assert Path(captured["cmd"][1]).parts[-3:] == ("scripts", "utils", "bid_outcome_weekly_report.py")
     assert "--since-days" in captured["cmd"]
     assert "--output" in captured["cmd"]
     assert "--no-sync-awards" in captured["cmd"]

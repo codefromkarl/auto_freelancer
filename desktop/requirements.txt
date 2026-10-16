@@ -1,0 +1,4 @@
+keyring>=25.6,<26
+cryptography>=43.0
+# Windows has no system IANA timezone database for the shared scheduler.
+tzdata>=2025.2; sys_platform == "win32"

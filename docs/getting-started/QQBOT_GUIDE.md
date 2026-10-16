@@ -1,4 +1,4 @@
-# QQ Bot 接入与审批
+# QQ Bot 通知与可选审批
 
 QQ Bot 使用腾讯官方 AppID/AppSecret 和 `https://api.bot.qq.com`，通过 Gateway 出站连接接收好友和群聊事件。可以另选签名 HTTP 回调，但不要同时运行两个接收端。
 
@@ -28,6 +28,8 @@ QQ_BOT_APPROVER_OPENIDS=
 
 ## 候选与审批
 
+本节适用于 `BID_APPROVAL_MODE=qq`。设置 `BID_APPROVAL_MODE=automatic` 后，机器人只发送执行结果，不需要批准命令，也不需要审批者名单；自动候选依据系统策略提交，信息不足自动暂缓。自动投标不依赖 Gateway 接收器，主动通知仍需要 AppID/AppSecret 和接收对象。
+
 候选快照冻结项目版本、完整文案、本币报价、工期、账号和接收对象。消息包含有效期和内容版本：
 
 ```text
@@ -44,6 +46,7 @@ QQ_BOT_APPROVER_OPENIDS=
 
 ```dotenv
 BID_SUBMISSION_ENABLED=false
+BID_APPROVAL_MODE=qq
 BID_MAX_DAILY_ATTEMPTS=1
 BID_MAX_DAILY_SCORED_PROJECTS=20
 BID_MAX_AMOUNT_USD=1000
@@ -51,7 +54,7 @@ BID_MIN_NET_HOURLY_USD=15
 BID_MAX_ESTIMATED_HOURS=40
 ```
 
-这些是受控试运行上限，不是通用接单标准。 `BID_MAX_DAILY_ATTEMPTS=0` 表示取消本地每日次数限制，仍统计尝试次数；平台额度、有效审批、过期、内容校验与防重继续生效。只有操作者明确决定开启真实投标并验证账号条件后，才设置 true 并启动 `scheduler.py --submit`。真实模式也必须取得 QQ 内容批准，没有无人审批的分数放行路径。
+这些是受控试运行上限，不是通用接单标准。`BID_MAX_DAILY_ATTEMPTS=0` 取消本地每日次数限制，仍统计尝试；平台额度、过期、内容校验与防重继续生效。操作者明确开启真实投标后设置 true 并启动 `scheduler.py --submit`。QQ 模式需内容批准；automatic 模式需有效系统决策、明确付款验证、当前完整评分和竞标评估、收益及账号资格通过。详细条件见 [自动模式契约](../architecture/ARCHITECTURE.md#无人工审批的自动模式)。
 
 ## 运行方式与限制
 

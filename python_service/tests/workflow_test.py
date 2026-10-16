@@ -231,7 +231,7 @@ def test_actual_model_call_and_cache_hit_are_counted_separately(local_workflow, 
         for _ in range(2):
             assert asyncio.run(service.score_projects_concurrent([p], db, max_retries=0))[0] == 1
         usage = workflow.statistics(db, workflow.now()-timedelta(days=1))["model_usage"]
-        assert usage == {"calls": 1, "cache_hits": 1, "observed_tokens": 123,
+        assert usage == {"calls": 1, "cache_hits": 1, "assessment_reuses": 1, "observed_tokens": 123,
                          "token_usage_complete": True, "cost": None}
     assert provider.score.await_count == 1
 

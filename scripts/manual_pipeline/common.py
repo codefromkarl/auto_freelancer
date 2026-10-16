@@ -3,7 +3,8 @@ Shared utilities for manual pipeline scripts.
 """
 from __future__ import annotations
 
-import fcntl
+import errno
+import time
 import logging
 import os
 import sys
@@ -159,26 +160,61 @@ class FileLock:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.fd: Optional[int] = None
+        self._locked = False
 
     def acquire(self, blocking: bool = False) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
-        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
         try:
-            fcntl.flock(self.fd, flags)
+            if os.name == "nt":
+                import msvcrt
+
+                # Windows permits locking beyond EOF; do not race to initialize a byte.
+                while True:
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                    try:
+                        msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                            raise
+                        if not blocking:
+                            self.release()
+                            return False
+                        time.sleep(0.1)
+            else:
+                import fcntl
+
+                flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+                try:
+                    fcntl.flock(self.fd, flags)
+                except BlockingIOError:
+                    self.release()
+                    return False
+            self._locked = True
             return True
-        except BlockingIOError:
+        except BaseException:
             self.release()
-            return False
+            raise
 
     def release(self) -> None:
         if self.fd is None:
             return
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            if self._locked:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
         finally:
             os.close(self.fd)
             self.fd = None
+            self._locked = False
 
 
 @contextmanager

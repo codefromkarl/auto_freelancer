@@ -27,6 +27,18 @@ _STICKY_LOCAL_STATUSES = {
 }
 
 
+def _unsupported_core_task(project):
+    title = str(project.get('title') or '').lower()
+    code_deliverable = bool(re.search(r'\b(script|tool|plugin|api|software platform|dashboard|crawler)\b', title))
+    if re.search(r'\bseo\b|digital marketing|marketing campaign', title) and not code_deliverable:
+        return True
+    if re.search(r'\b(trainers?|tutors?|instructors?)\s+(needed|required|wanted)\b', title):
+        return True
+    if re.search(r'employment.*verification|on.site.*verification|lucky jet.*predict|(?:crash|mines).*predict', title):
+        return True
+    return False
+
+
 def _check_skill_match(project_dict: Dict[str, Any]) -> bool:
     """
     检查项目是否与简历核心技能匹配
@@ -115,10 +127,14 @@ def _pre_filter_projects(
         'filtered_time': 0,
         'filtered_billing_type': 0,
         'filtered_data': 0,
+        'filtered_core_task': 0,
         'kept': 0
     }
 
     for project in projects_data:
+        if enable_skill_match and _unsupported_core_task(project):
+            stats['filtered_core_task'] += 1
+            continue
         # 0.5 计费类型筛选（默认只保留 fixed 一次性项目）
         if fixed_price_only:
             project_type = str(project.get("type") or "").lower()
@@ -267,7 +283,12 @@ def _apply_project_fields(project: Project, project_dict: Dict[str, Any]) -> Non
     if previous_scoring != scoring_inputs(project):
         project.ai_score = None
         project.ai_reason = None
-        project.score_metadata = None
+        # Preserve only a separately bound model assessment on dynamic updates.
+        # Its own input/prompt/expiry checks decide whether it can be reused.
+        from services.scoring_policy import object_value
+        metadata = object_value(project.score_metadata) or {}
+        if previous != project_material_fields(project) or not metadata.get("model_assessment"):
+            project.score_metadata = None
         project.scored_at = None
     from sqlalchemy.orm import object_session
     session = object_session(project)

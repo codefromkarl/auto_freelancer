@@ -334,7 +334,7 @@ class FreelancerClient:
             search_filter = {}
 
             if skills:
-                search_filter['jobs'] = skills
+                search_filter['jobs[]'] = skills
             if budget_min is not None:
                 search_filter['min_avg_price'] = budget_min
             if budget_max is not None:
@@ -973,6 +973,61 @@ class FreelancerClient:
                 status_code=500
             )
 
+
+    async def _get_observation_result(self, path: str, params: dict) -> dict:
+        """Bounded authenticated GET for outcome observation; never retry mutations."""
+        await self._rate_limiter.acquire()
+        def fetch():
+            with _requests.Session() as session:
+                return session.get(self.session.url.rstrip('/') + path, params=params,
+                    headers={"Freelancer-OAuth-V1": settings.FREELANCER_OAUTH_TOKEN},
+                    timeout=(5, 15), allow_redirects=False)
+        try:
+            response = await asyncio.to_thread(fetch)
+        except _requests.RequestException as exc:
+            raise FreelancerAPIError(type(exc).__name__, status_code=503) from None
+        if response.status_code != 200:
+            raise FreelancerAPIError('Outcome GET rejected', status_code=response.status_code)
+        try:
+            data = response.json()
+        except ValueError:
+            raise FreelancerAPIError('Outcome GET returned invalid JSON', status_code=502) from None
+        if (not isinstance(data, dict) or data.get('status') != 'success'
+                or not isinstance(data.get('result'), dict)):
+            raise FreelancerAPIError('Outcome GET returned incomplete data', status_code=502)
+        return data['result']
+
+    @staticmethod
+    def _observation_ids(ids):
+        if (not 1 <= len(ids) <= 50 or len(set(ids)) != len(ids)
+                or any(isinstance(i, bool) or not isinstance(i, int) or i <= 0 for i in ids)):
+            raise ValueError('Observation requires 1–50 distinct positive IDs')
+
+    async def get_bid_outcomes(self, bid_ids: List[int]) -> List[dict]:
+        self._observation_ids(bid_ids)
+        result = await self._get_observation_result('/api/projects/0.1/bids/',
+            {'bids[]': bid_ids, 'limit': 50, 'offset': 0})
+        if not isinstance(result.get('bids'), list) or any(not isinstance(b, dict) for b in result['bids']):
+            raise FreelancerAPIError('Incomplete bid observation', status_code=502)
+        return result['bids']
+
+    async def get_project_threads(self, project_ids: List[int]) -> List[dict]:
+        self._observation_ids(project_ids)
+        result = await self._get_observation_result('/api/messages/0.1/threads/',
+            {'contexts[]': project_ids, 'context_type': 'project', 'limit': 50, 'offset': 0,
+             'last_message': True})
+        if not isinstance(result.get('threads'), list) or any(not isinstance(t, dict) for t in result['threads']):
+            raise FreelancerAPIError('Incomplete thread observation', status_code=502)
+        return result['threads']
+
+    async def get_inbound_messages(self, thread_ids: List[int], sender_ids: List[int]) -> List[dict]:
+        self._observation_ids(thread_ids)
+        self._observation_ids(sender_ids)
+        result = await self._get_observation_result('/api/messages/0.1/messages/',
+            {'threads[]': thread_ids, 'senders[]': sender_ids, 'limit': 50, 'offset': 0})
+        if not isinstance(result.get('messages'), list) or any(not isinstance(m, dict) for m in result['messages']):
+            raise FreelancerAPIError('Incomplete message observation', status_code=502)
+        return result['messages']
 
     async def get_project_bids(
         self,

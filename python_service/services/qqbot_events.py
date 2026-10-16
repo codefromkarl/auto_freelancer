@@ -73,6 +73,11 @@ def parse_message(event: dict) -> dict | None:
 
 def preview_text(snapshot: dict) -> str:
     payload = snapshot['payload']
+    if payload.get('authorization', {}).get('mode') == 'automatic':
+        return (f"自动投标候选（未提交）\n项目 {payload['project_id']}：{payload['title']}\n"
+                f"报价 {payload['amount']:.2f} {payload['currency']}；工期 {payload['period']} 天\n"
+                f"系统策略已核对候选与标书；执行前仍会核验账号、额度和最新需求。\n"
+                f"完整提案：\n{payload['description']}\n内容版本 {snapshot['digest'][:16]}")
     risk = '需人工风险复核' if payload.get('review_required') else '基础检查已通过'
     command = '批准风险' if payload.get('review_required') else '批准'
     comparison = ''
@@ -109,6 +114,29 @@ def notify_snapshot(client: QQBotClient, store: QQBotStore, snapshot: dict) -> b
     key = f"{client.config.app_id}:{client.config.target_type}:{client.config.target_id}:{snapshot['id']}:{snapshot['digest']}"
     if not store.reserve_notification(key):
         return False
+    try:
+        message_id = client.send_text(text)
+    except Exception:
+        store.finish_notification(key)
+        raise
+    store.finish_notification(key, message_id)
+    return True
+
+
+def notify_bid_result(client: QQBotClient, store: QQBotStore, snapshot: dict, result: dict) -> bool:
+    """Optional result receipt; QQ delivery never authorizes or rolls back a trade."""
+    config = client.config
+    if not config.target_id or not config.app_id or not config.app_secret:
+        return False
+    payload = snapshot['payload']
+    status = result.get('status', 'blocked')
+    key = f"result:{config.app_id}:{config.target_type}:{config.target_id}:{snapshot['id']}:{status}"
+    if not store.reserve_notification(key):
+        return False
+    text = (f"自动投标结果：{status}\n项目 {payload['project_id']}：{payload['title'][:200]}\n"
+            f"报价 {payload['amount']:.2f} {payload['currency']}；工期 {payload['period']} 天\n"
+            f"平台 Bid ID：{result.get('bid_id') or '无确认收据'}\n"
+            f"内容版本 {snapshot['digest'][:16]}；无需 QQ 审批。")
     try:
         message_id = client.send_text(text)
     except Exception:

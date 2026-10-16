@@ -251,7 +251,7 @@ def _align_proposal_with_amount(proposal: str, amount: float, currency: str) -> 
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare QQ approval snapshot or submit an already-approved snapshot")
+    parser = argparse.ArgumentParser(description="Prepare a frozen bid or submit under the configured authorization mode")
     parser.add_argument('--project-id', type=int)
     parser.add_argument('--amount', type=float)
     parser.add_argument('--amount-currency')
@@ -266,14 +266,23 @@ def main(argv=None) -> int:
     from services.qqbot_store import QQBotStore
     from services.qqbot_events import notify_snapshot, preview_text
     try:
-        common.get_settings()
+        settings = common.get_settings()
         config = QQBotConfig.from_env()
         store = QQBotStore(config.state_path)
         with common.get_db_context() as db:
             if args.submit:
-                if args.dry_run or not args.approval_id:
-                    raise ValueError('--submit requires an approved snapshot ID and cannot use --dry-run')
-                result = asyncio.run(submit_approved_bid(db, args.approval_id, store))
+                if args.dry_run:
+                    raise ValueError('--submit cannot use --dry-run')
+                identity = args.approval_id
+                if not identity:
+                    if settings.BID_APPROVAL_MODE != 'automatic' or not args.project_id or args.amount is None:
+                        raise ValueError('--submit requires a snapshot ID or an automatic-mode project and amount')
+                    if not settings.BID_SUBMISSION_ENABLED:
+                        raise ValueError('真实投标开关未开启')
+                    record = asyncio.run(prepare_bid(db, args.project_id, args.amount, args.period,
+                        args.proposal, args.amount_currency, store))
+                    identity = record['id']
+                result = asyncio.run(submit_approved_bid(db, identity, store))
                 print(f"Submitted confirmed bid ID: {result['bid_id']}")
             else:
                 if not args.project_id or args.amount is None:
@@ -281,7 +290,7 @@ def main(argv=None) -> int:
                 record = asyncio.run(prepare_bid(db, args.project_id, args.amount, args.period,
                     args.proposal, args.amount_currency, store))
                 print(preview_text(record))
-                if not args.dry_run:
+                if not args.dry_run and settings.BID_APPROVAL_MODE == 'qq':
                     notify_snapshot(QQBotClient(config), store, record)
                 print('Prepared only. No Freelancer bid was submitted.')
     except Exception as exc:

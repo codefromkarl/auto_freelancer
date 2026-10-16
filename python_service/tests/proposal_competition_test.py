@@ -201,7 +201,9 @@ def test_generation_receives_reference_and_returns_matching_evaluation(market):
     assert result['success'] and result['validation_passed']
     prompt=llm.generate_proposal.call_args.kwargs['user_prompt']
     assert 'COMPETITOR_REFERENCE_DATA' in prompt and '"median": 400.0' in prompt
-    assert 'agreed delivery period is 7' in prompt
+    assert 'offered delivery period is 7' in prompt
+    assert 'Do not claim the client has agreed' in prompt
+    assert 'do not offer text-layer-only delivery' in prompt
     assert result['competition_review']['text_digest']==hashlib.sha256(result['proposal'].encode()).hexdigest()
     llm.generate_proposal.return_value=PEER
     blocked=asyncio.run(service.generate_proposal(project,{'suggested_bid':500,'period':7},db=db))
@@ -274,10 +276,10 @@ def test_cli_review_uses_frozen_evaluation_and_never_prints_stale_as_zero(market
     monkeypatch.setattr(module,'_refresh_remote_status_and_filter',AsyncMock(return_value=([project],0)))
     report=tmp_path/'review.md'
     assert module.main(['--threshold','7','--output',str(report)])==0
-    assert '中位价 400 USD' in report.read_text()
+    assert '中位价 400 USD' in report.read_text(encoding="utf-8")
     audit=db.query(AuditLog).filter_by(action='competitor_snapshot').one()
     meta=json.loads(audit.response_data);meta['fetched_at']=(datetime.utcnow()-timedelta(hours=2)).isoformat()
     audit.response_data=json.dumps(meta);db.commit()
     assert module.main(['--threshold','7','--output',str(report)])==0
-    text=report.read_text()
+    text=report.read_text(encoding="utf-8")
     assert 'N/A (stale)' in text and 'median=unknown' in text
