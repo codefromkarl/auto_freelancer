@@ -15,7 +15,7 @@ from services.project_service import project_material_fields
 from services.scoring_policy import digest, object_value, score_is_current, policy_signature
 
 CURRENT_RUN = ContextVar("workflow_run_id", default=None)
-STATES = {"needs_evaluation", "needs_clarification", "ready", "awaiting_approval",
+STATES = {"needs_evaluation", "needs_clarification", "ready", "awaiting_approval", "awaiting_submission",
           "deferred", "rejected", "submitted", "outcome_unknown"}
 
 
@@ -95,7 +95,17 @@ def held(row):
 
 def evaluation_allowed(db, project):
     row = ensure(db, project)
-    if row.state in {"needs_clarification", "awaiting_approval", "submitted", "outcome_unknown"}:
+    if row.state in {'deferred', 'rejected'} and row.resume_condition == 'scope_or_policy_changed':
+        from database.models import WorkflowEvent
+        last = db.query(WorkflowEvent).filter_by(project_freelancer_id=project.freelancer_id,
+            stage='evaluation', outcome='deferred').order_by(WorkflowEvent.id.desc()).first()
+        details = object_value(last.details) if last else {}
+        if (details and details.get('material_hash') == material_hash(project)
+                and details.get('policy_hash') == policy_signature(db)):
+            return False
+        transition(db, row, 'needs_evaluation', 'evaluation_context_changed', '需求或策略已变化，重新评估',
+                   held_by=None, resume_condition=None)
+    if row.state in {"needs_clarification", "awaiting_approval", "awaiting_submission", "submitted", "outcome_unknown"}:
         return False
     if row.held_by == "operator" or row.resume_condition == "manual":
         if row.resume_condition == "time" and row.resume_at and row.resume_at <= now():
@@ -104,6 +114,27 @@ def evaluation_allowed(db, project):
         else:
             return False
     return True
+
+
+def scope_questions(project):
+    if not isinstance(project, Project):
+        return []
+    db = object_session(project)
+    if db is None:
+        return []
+    row = db.query(CandidateWorkflow).filter_by(project_freelancer_id=project.freelancer_id).first()
+    return (object_value(row.questions) or []) if row else []
+
+
+def defer_evaluation(db, project, signature, reason):
+    row = ensure(db, project)
+    if row.held_by == 'operator' or row.resume_condition == 'manual':
+        return
+    invalidate_score(project)
+    transition(db, row, 'deferred', 'invalid_model_terms', reason,
+               held_by='system', resume_condition='scope_or_policy_changed')
+    event(db, 'evaluation', 'deferred', project_id=project.freelancer_id, reason='invalid_model_terms',
+          details={'policy_hash':signature, 'material_hash':material_hash(project)})
 
 
 def invalidate_score(project):
@@ -117,6 +148,13 @@ def apply_score(db, project):
     if row.held_by == "operator" or row.resume_condition == "manual" or row.state in {"submitted", "outcome_unknown"}:
         return row
     metadata = object_value(project.score_metadata) or {}
+    if metadata.get('recommendation') == 'reject':
+        reason = project.ai_reason or '模型建议排除该任务'
+        transition(db, row, 'rejected', 'model_rejected', reason,
+                   held_by='system', resume_condition='scope_or_policy_changed')
+        event(db, 'evaluation', 'deferred', project_id=project.freelancer_id, reason='model_rejected',
+              details={'policy_hash':policy_signature(db), 'material_hash':material_hash(project)})
+        return row
     questions = metadata.get("clarification_questions") or []
     if questions:
         structured = [{"id": digest(question)[:16], "question": question} for question in questions]
@@ -125,7 +163,8 @@ def apply_score(db, project):
             held_by="system", resume_condition="answers", resume_at=None)
     transition(db, row, "needs_evaluation", "scored", "已完成评分，等待候选可行性检查",
                questions="[]", held_by=None, resume_condition=None, resume_at=None)
-    return refresh_readiness(db, project, 7.0)
+    from config import settings
+    return refresh_readiness(db, project, settings.BID_MIN_AUTO_SCORE if settings.BID_APPROVAL_MODE=='automatic' else 7.0)
 
 
 def classify_terms_error(message):
@@ -142,13 +181,15 @@ def classify_terms_error(message):
 
 def refresh_readiness(db, project, threshold, signature=None):
     row = ensure(db, project)
+    if row.state in {'deferred','rejected'} and row.resume_condition == 'scope_or_policy_changed' and not evaluation_allowed(db,project):
+        return row
     if row.held_by == "operator" or row.resume_condition == "manual":
         if row.resume_condition == "time" and row.resume_at and row.resume_at <= now():
             transition(db, row, "needs_evaluation", "defer_elapsed", "暂缓时间已到，重新检查",
                        held_by=None, resume_condition=None, resume_at=None)
         else:
             return row
-    if row.state in {"submitted", "outcome_unknown", "awaiting_approval"}:
+    if row.state in {"submitted", "outcome_unknown", "awaiting_approval", "awaiting_submission"}:
         return row
     if str(project.status or "").lower() not in {"open", "active", "open_for_bidding"}:
         return transition(db, row, "deferred", "not_biddable", "项目当前状态不可投标",
@@ -174,12 +215,25 @@ def refresh_readiness(db, project, threshold, signature=None):
         if not hours or project.suggested_bid is None:
             raise ValueError("报价或估算工时未知")
         native = _resolve_submission_amount(project, float(project.suggested_bid), "USD")
+        from config import settings
+        if settings.BID_APPROVAL_MODE == 'automatic':
+            from services.automatic_bid_policy import resolve_quote
+            native = resolve_quote(project, native, {'status': 'missing'})
         validate_terms(project, native, min(30, max(2, math.ceil(hours / 6))))
-        risk_review(project)
+        unknown, _ = risk_review(project)
+        if (settings.BID_APPROVAL_MODE == 'automatic' and unknown
+                and settings.BID_AUTO_REQUIRE_VERIFIED_CLIENT_PAYMENT):
+            return transition(db, row, 'deferred', 'payment_unknown', '客户付款验证未知，自动暂缓',
+                              held_by='system', resume_condition='remote_data_changed')
+        if settings.BID_APPROVAL_MODE == 'automatic':
+            from services.automatic_bid_policy import validate_local_candidate
+            validate_local_candidate(project, native, min(30, max(2, math.ceil(hours / 6))))
     except (ValueError, TypeError, OverflowError) as exc:
         return transition(db, row, "deferred", classify_terms_error(str(exc)), str(exc),
                           held_by="system", resume_condition="scope_or_terms_changed")
-    return transition(db, row, "ready", "eligible", "可准备标书，报价、周期和最终内容仍需审批",
+    return transition(db, row, "ready", "eligible",
+                      "可准备标书，提交前由系统核验" if settings.BID_APPROVAL_MODE == 'automatic'
+                      else "可准备标书，报价、周期和最终内容仍需审批",
                       held_by=None, resume_condition=None, resume_at=None)
 
 
@@ -245,16 +299,17 @@ def require_preparable(db, project):
     row = db.query(CandidateWorkflow).filter_by(project_freelancer_id=project.freelancer_id).first()
     if row is not None:
         row = ensure(db, project)
-    if row is not None and row.state not in {"ready", "awaiting_approval"}:
+    if row is not None and row.state not in {"ready", "awaiting_approval", "awaiting_submission"}:
         raise ValueError(f"候选尚不可准备：{row.reason}")
     if row is not None and row.state == "ready" and not score_is_current(project, policy_signature(db)):
         raise ValueError("候选评分已失效，请重新评估后准备标书")
     return row
 
 
-def mark_prepared(db, project, approval_id):
+def mark_prepared(db, project, approval_id, *, automatic=False):
     row = ensure(db, project)
-    transition(db, row, "awaiting_approval", "prepared", "最终标书已准备，等待 QQ 内容审批",
+    transition(db, row, "awaiting_submission" if automatic else "awaiting_approval", "prepared",
+               "最终标书已准备，等待系统提交核验" if automatic else "最终标书已准备，等待 QQ 内容审批",
                approval_id=approval_id)
     event(db, "preparation", "prepared", project_id=project.freelancer_id,
           key=f"prepared:{approval_id}")
@@ -275,10 +330,11 @@ def reconcile(db):
             for raw in conn.execute("SELECT * FROM approvals ORDER BY created_at DESC"):
                 item = dict(raw)
                 payload = json.loads(item["payload"])
+                automatic = payload.get('authorization', {}).get('mode') == 'automatic'
                 if (payload.get("account_id") != settings.FREELANCER_USER_ID
-                        or payload.get("qq_app_id") != config.app_id
+                        or (not automatic and (payload.get("qq_app_id") != config.app_id
                         or payload.get("qq_target_id") != config.target_id
-                        or payload.get("qq_target_type") != config.target_type
+                        or payload.get("qq_target_type") != config.target_type))
                         or canonical_hash(payload) != item["digest"]):
                     continue
                 item["payload"] = payload
@@ -308,7 +364,7 @@ def reconcile(db):
                        held_by="system", resume_condition="manual")
         elif state == "approved":
             event(db, "approval", "approved", project_id=project_id, key=f"decision:{snapshot['id']}:approved")
-        if state in {"pending", "approved"} and snapshot["expires_at"] <= time.time():
+        if state in {"pending", "approved", "auto_pending", "auto_authorized"} and snapshot["expires_at"] <= time.time():
             if row.held_by != "operator":
                 transition(db, row, "deferred", "approval_expired", "批准已过期，等待人工恢复并重新准备",
                            approval_id=None, held_by="system", resume_condition="manual")
@@ -332,18 +388,21 @@ def statistics(db, since):
     state_counts = db.query(CandidateWorkflow.state, func.count(CandidateWorkflow.id)).group_by(CandidateWorkflow.state).all()
     runs = db.query(WorkflowRun).filter(WorkflowRun.started_at >= since).order_by(WorkflowRun.started_at.desc()).limit(20).all()
     score_events = db.query(WorkflowEvent).filter(WorkflowEvent.stage == "score", WorkflowEvent.created_at >= since).all()
-    calls = hits = tokens = 0
+    calls = hits = tokens = reuses = 0
     usage_complete = True
     for item in score_events:
         detail = object_value(item.details) or {}
         calls += detail.get("model_calls", 0)
         hits += int(detail.get("cache_hit", False))
+        reuses += int(detail.get("assessment_reused", False))
         tokens += detail.get("tokens", 0)
         if detail.get("model_calls", 0) and not detail.get("usage_complete"):
             usage_complete = False
+    from services.bid_outcome_service import outcome_summary
     return {"since": since.isoformat() + "Z", "queue": dict(state_counts),
+        "bid_outcomes": outcome_summary(db),
         "stages": [{"stage": a, "outcome": b, "reason_code": c, "count": n} for a, b, c, n in grouped],
-        "model_usage": {"calls": calls, "cache_hits": hits, "observed_tokens": tokens,
+        "model_usage": {"calls": calls, "cache_hits": hits, "assessment_reuses": reuses, "observed_tokens": tokens,
                         "token_usage_complete": usage_complete, "cost": None},
         "runs": [{"id": r.id, "status": r.status, "started_at": r.started_at.isoformat() + "Z",
                   "duration_ms": r.duration_ms, "failed_stage": r.failed_stage,

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Data handling — BidMaster Local preview</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="index.html">BidMaster <span>Local</span></a>
+    </header>
+    <main class="small-copy">
+      <h1>How this preview handles data</h1>
+      <p>
+        This page describes the implemented local preview. It is not a claim
+        that a public paid service, merchant account or legal entity has been
+        launched.
+      </p>
+      <h2>On your device</h2>
+      <p>
+        Profiles, imported briefs, assessments, proposals, task history and
+        submission receipts are stored in your OS user-data directory. Model API
+        keys and platform tokens use the OS credential vault. A transient local
+        session key authorizes the browser interface; it is not a model
+        credential.
+      </p>
+      <h2>Requests you choose</h2>
+      <p>
+        Model tasks send the necessary brief and user background directly to the
+        HTTPS endpoint you configure. That provider's processing and retention
+        policies apply. Platform requests require separate permission and
+        account authorization. These requests are not relayed through publisher
+        infrastructure.
+      </p>
+      <h2>Diagnostics and telemetry</h2>
+      <p>
+        No product analytics or automatic log upload is enabled. User-exported
+        safe diagnostics exclude keys, profile/project contents, prompts and raw
+        logs. Share only diagnostics you have reviewed.
+      </p>
+      <h2>Software access</h2>
+      <p>
+        Signed license documents include an installation identifier,
+        capabilities and validity period. The current preview verifies them
+        locally. Hosted checkout and automated merchant activation are not
+        active. Any future cloud order service needs its own disclosed data
+        handling and commercial terms before launch.
+      </p>
+      <h2>Removal and backups</h2>
+      <p>
+        You can remove saved keys in the app. Uninstall preserves working data
+        so an upgrade or accidental uninstall does not erase receipts. You can
+        remove the separate data directory yourself after exporting records and
+        reconciling outstanding or unknown submissions. Do not overwrite a newer
+        submission ledger with an old backup.
+      </p>
+      <p><a href="index.html">Back to the product preview</a></p>
+    </main>
+  </body>
+</html>

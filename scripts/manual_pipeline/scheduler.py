@@ -94,6 +94,7 @@ async def _step_fetch(
 ) -> Set[int]:
     """Fetch projects from API and return set of freelancer_ids stored."""
     from services import project_service
+    from config import settings
 
     new_ids: Set[int] = set()
     successful_reads = 0
@@ -106,6 +107,7 @@ async def _step_fetch(
                 results = await project_service.search_projects(
                     db=db,
                     query=keyword,
+                    skills=settings.BID_SEARCH_SKILL_IDS or None,
                     limit=limit,
                     offset=0,
                     sync_from_api=True,
@@ -244,9 +246,14 @@ async def _step_score(
             # Unknown billing types stay deferred until confirmed fixed.
             pending = [p for p in pending if getattr(p, "type_id", None) == 1]
 
+        if os.environ.get('BIDMASTER_LOCAL_MODE') == '1':
+            pending = [p for p in pending if p.freelancer_id > 0]
         from services import workflow_service as workflow
+        from services.project_service import _unsupported_core_task
         signature = policy_signature(db)
-        pending = [p for p in pending if workflow.evaluation_allowed(db, p) and not score_is_current(p, signature)][:50]
+        from config import settings
+        pending = [p for p in pending if not _unsupported_core_task(p.to_dict())
+            and workflow.evaluation_allowed(db, p) and not score_is_current(p, signature)][:settings.BID_MAX_SCORED_PROJECTS_PER_CYCLE]
         if not pending:
             logger.info("No projects need scoring")
             return 0
@@ -263,7 +270,7 @@ async def _step_score(
         scoring_service = get_scoring_service()
         scoring_service.config.generate_proposals = False
         total_scored, errors, _, _ = await scoring_service.score_projects_concurrent(
-            projects=pending, db=db, batch_size=batch_size, max_retries=2,
+            projects=pending, db=db, batch_size=batch_size, max_retries=0,
         )
         logger.info("Scored %d projects (%d errors)", total_scored, errors)
         return total_scored
@@ -308,6 +315,8 @@ def select_bid_candidates(
         )
         if fixed_price_only:
             query = query.filter(Project.type_id == 1)
+        if os.environ.get('BIDMASTER_LOCAL_MODE') == '1':
+            query = query.filter(Project.freelancer_id > 0)
 
         candidates = (
             query.order_by(Project.ai_score.desc(), publication_timestamp().desc(), Project.freelancer_id.desc())
@@ -332,6 +341,10 @@ def select_bid_candidates(
             try:
                 from services.bid_service import _resolve_submission_amount
                 native = _resolve_submission_amount(p, float(p.suggested_bid), "USD")
+                from config import settings
+                if settings.BID_APPROVAL_MODE == 'automatic':
+                    from services.automatic_bid_policy import resolve_quote
+                    native = resolve_quote(p, native, {'status': 'missing'})
                 validate_terms(p, native, _determine_bid_period({"estimated_hours": p.estimated_hours}))
                 risk_review(p)
             except (ValueError, TypeError, OverflowError):
@@ -382,13 +395,15 @@ def _determine_bid_period(candidate: Dict[str, Any]) -> int:
 
 
 async def _step_auto_bid(candidates, dry_run, logger, replacement_selector=None):
-    """Prepare, notify and submit only an immutable, explicitly approved snapshot."""
+    """Freeze final content and execute the selected authorization mode."""
     from services.approved_bids import prepare_bid, submit_approved_bid
     from services.qqbot_service import QQBotClient, QQBotConfig
     from services.qqbot_store import QQBotStore
-    from services.qqbot_events import notify_snapshot
+    from services.qqbot_events import notify_snapshot, notify_bid_result
+    from config import settings
+    automatic = settings.BID_APPROVAL_MODE == 'automatic'
     config = QQBotConfig.from_env()
-    if not config.target_id or not config.approvers:
+    if not automatic and (not config.target_id or not config.approvers):
         logger.warning('QQ target/approvers not configured; candidates stay local, no approval or submission')
         return [{'project_id': c['freelancer_id'], 'status': 'configuration_required'} for c in candidates]
     store = QQBotStore(config.state_path)
@@ -408,6 +423,7 @@ async def _step_auto_bid(candidates, dry_run, logger, replacement_selector=None)
             continue
         attempted.add(pid)
         operation_stage = "preparation"
+        snapshot = None
         try:
             amount = _determine_bid_amount(candidate)
             if amount is None:
@@ -415,8 +431,21 @@ async def _step_auto_bid(candidates, dry_run, logger, replacement_selector=None)
             period = _determine_bid_period(candidate)
             with common.get_db_context() as db:
                 snapshot = await prepare_bid(db, pid, amount, period,
-                    amount_currency='USD' if candidate.get('suggested_bid') else candidate.get('currency_code'), store=store)
+                    amount_currency='USD' if candidate.get('suggested_bid') else candidate.get('currency_code'), store=store,
+                    competitive_quote=automatic)
                 prepared += 1
+                if automatic:
+                    if dry_run:
+                        results.append({'project_id': pid, 'snapshot_id': snapshot['id'], 'status': 'dry_run'})
+                    else:
+                        operation_stage = 'submission'
+                        result = await submit_approved_bid(db, snapshot['id'], store)
+                        results.append({'project_id': pid, 'snapshot_id': snapshot['id'], **result})
+                        try:
+                            await asyncio.to_thread(notify_bid_result, client, store, snapshot, result)
+                        except Exception as exc:
+                            logger.error('QQ result delivery failed (%s); bid result unchanged', type(exc).__name__)
+                    continue
                 try:
                     confirmed = await asyncio.to_thread(notify_snapshot, client, store, snapshot)
                     if confirmed:
@@ -440,6 +469,8 @@ async def _step_auto_bid(candidates, dry_run, logger, replacement_selector=None)
         except Exception as exc:
             logger.error('Candidate %s blocked (%s): %s', pid, type(exc).__name__, exc)
             results.append({'project_id': pid, 'status': 'error'})
+            if automatic and snapshot is not None:
+                store.finish(snapshot['id'], 'blocked', type(exc).__name__)
             with common.get_db_context() as db:
                 project = db.query(Project).filter_by(freelancer_id=pid).first()
                 if project is not None:
@@ -454,7 +485,14 @@ async def _step_auto_bid(candidates, dry_run, logger, replacement_selector=None)
                         workflow.transition(db, row, "deferred", "preparation_failed", str(exc),
                             held_by="system", resume_condition="score_changed")
                     if operation_stage == "preparation":
-                        workflow.event(db, "preparation", "failed", project_id=pid, reason=type(exc).__name__)
+                        issues = getattr(exc, "issues", None)
+                        workflow.event(db, "preparation", "failed", project_id=pid, reason=type(exc).__name__,
+                                       details={"validation_issues": issues} if issues else None)
+                        if issues:
+                            from database.models import AuditLog
+                            db.add(AuditLog(action="proposal_generation_failed", entity_type="project",
+                                entity_id=pid, response_data=json.dumps({"validation_issues": issues}, ensure_ascii=False),
+                                status="error"))
             if replacement_selector is not None:
                 queue.extend(c for c in replacement_selector() if c['freelancer_id'] not in attempted
                              and c['freelancer_id'] not in {p['freelancer_id'] for p in queue})
@@ -465,17 +503,28 @@ async def _consume_approved(logger):
     from services.qqbot_service import QQBotConfig
     from services.qqbot_store import QQBotStore
     from services.approved_bids import submit_approved_bid
+    from services.qqbot_service import QQBotClient
+    from services.qqbot_events import notify_bid_result
+    from config import settings
+    automatic = settings.BID_APPROVAL_MODE == 'automatic'
     config = QQBotConfig.from_env()
-    if not config.target_id or not config.approvers:
+    if not automatic and (not config.target_id or not config.approvers):
         return
     store = QQBotStore(config.state_path)
     for record in store.list_active():
-        if record['state'] != 'approved':
+        if record['state'] not in ({'auto_pending', 'auto_authorized'} if automatic else {'approved'}):
             continue
         try:
             with common.get_db_context() as db:
-                await submit_approved_bid(db, record['id'], store)
+                result = await submit_approved_bid(db, record['id'], store)
+            if automatic:
+                try:
+                    await asyncio.to_thread(notify_bid_result, QQBotClient(config), store, record, result)
+                except Exception as exc:
+                    logger.error('QQ result delivery failed (%s); bid result unchanged', type(exc).__name__)
         except Exception as exc:
+            if automatic:
+                store.finish(record['id'], 'blocked', type(exc).__name__)
             logger.error('Approved bid blocked (%s); no automatic retry of claimed outcomes', type(exc).__name__)
 
 
@@ -543,6 +592,12 @@ async def _run_cycle(
         skip_bid: If True, only fetch+score, skip candidate selection and bidding.
                   Used during night mode to accumulate data without acting.
     """
+    if os.environ.get('BIDMASTER_LOCAL_MODE') == '1':
+        from desktop.paths import data_directory
+        from desktop.configuration import ConfigStore
+        from desktop.licensing import require_platform_access
+        local = ConfigStore().load()
+        require_platform_access(data_directory(), local.installation_id, 'platform_read' if dry_run else 'platform_bid')
     cycle_start = time.monotonic()
     summary: Dict[str, Any] = {"timestamp": datetime.utcnow().isoformat()}
     report_output = weekly_report_output or str(common.REPO_ROOT / "logs" / "bid_outcome_weekly_report.md")
@@ -653,10 +708,25 @@ async def _observed_step(stage, operation):
             timings[stage] = round((time.monotonic() - started) * 1000, 2)
 
 
+async def _step_sync_outcomes(logger):
+    from services.bid_outcome_service import sync_bid_outcomes
+    try:
+        with common.get_db_context() as db:
+            return await sync_bid_outcomes(db)
+    except Exception as exc:
+        # A readback failure never undoes or retries a confirmed submission.
+        logger.error('Outcome observation failed (%s); submission records unchanged', type(exc).__name__)
+        with common.get_db_context() as db:
+            from services import workflow_service as workflow
+            workflow.event(db, 'outcome_tracking', 'failed', reason=type(exc).__name__)
+        return {'error_type': type(exc).__name__}
+
+
 async def run_cycle(*args, **kwargs):
     from services import workflow_service as workflow
     from database.models import WorkflowRun
     import uuid
+    outcome_sync_enabled = kwargs.pop('outcome_sync_enabled', False)
     identity = uuid.uuid4().hex
     started = time.monotonic()
     with common.get_db_context() as db:
@@ -669,6 +739,9 @@ async def run_cycle(*args, **kwargs):
     failure = None
     try:
         summary = await _run_cycle(*args, **kwargs)
+        if outcome_sync_enabled:
+            summary['bid_outcomes'] = await _observed_step('outcome_tracking',
+                _step_sync_outcomes(kwargs.get('logger') or logging.getLogger('scheduler')))
         summary["run_id"] = identity
         return summary
     except Exception as exc:
@@ -749,7 +822,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--confirm", action="store_true",
-        help="Compatibility flag: real bidding always requires QQ approval",
+        help="Compatibility flag for QQ mode; automatic mode uses system policy",
     )
     parser.add_argument(
         "--confirm-timeout", type=int, default=300,
@@ -808,7 +881,9 @@ def main(argv=None) -> int:
         action="store_true",
         help="Sync award data when generating weekly report (default: off)",
     )
-    parser.set_defaults(weekly_report=True)
+    parser.add_argument('--no-outcome-sync', dest='outcome_sync', action='store_false',
+        help='Disable read-only bid status and customer response observation (default: on)')
+    parser.set_defaults(weekly_report=True, outcome_sync=True)
     args = parser.parse_args(argv)
 
     logger = common.setup_logging(
@@ -830,7 +905,7 @@ def main(argv=None) -> int:
             return common.EXIT_VALIDATION_ERROR
         from services.qqbot_service import QQBotConfig
         config = QQBotConfig.from_env()
-        if not config.target_id or not config.approvers:
+        if settings.BID_APPROVAL_MODE == 'qq' and (not config.target_id or not config.approvers):
             logger.error('QQ target and approver OpenIDs must be configured')
             return common.EXIT_VALIDATION_ERROR
 
@@ -892,7 +967,8 @@ async def _scheduler_loop(args, keywords, allowed_statuses, fixed_price_only, tz
                 weekly_report_enabled=args.weekly_report,
                 weekly_report_since_days=args.weekly_report_since_days,
                 weekly_report_output=args.weekly_report_output,
-                weekly_report_sync_awards=args.weekly_report_sync_awards)
+                weekly_report_sync_awards=args.weekly_report_sync_awards,
+                outcome_sync_enabled=args.outcome_sync)
             print(f"Cycle {cycle_count}: {summary}", flush=True)
         except Exception as exc:
             cycle_failed = True

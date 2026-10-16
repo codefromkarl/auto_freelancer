@@ -21,6 +21,7 @@ export interface BidApproval {
     description: string;
     review_required: boolean;
     review_notes: string[];
+    authorization?: { mode: 'automatic'; source: 'automatic_policy'; version: string };
     competition_review?: {
       status: string;
       policy_version: string;
@@ -44,6 +45,7 @@ export type WorkflowState =
   | 'needs_clarification'
   | 'ready'
   | 'awaiting_approval'
+  | 'awaiting_submission'
   | 'deferred'
   | 'rejected'
   | 'submitted'
@@ -66,12 +68,42 @@ export interface WorkflowCandidate {
   updated_at: string | null;
 }
 
+export interface BidOutcomeObservation {
+  project_id: number;
+  title: string;
+  bid_id: number;
+  amount: number;
+  currency: string;
+  days: number;
+  state: 'active' | 'awarded' | 'withdrawn' | 'inactive' | 'unknown';
+  reason: string | null;
+  checked_at: string | null;
+  customer_response: {
+    state: 'observed' | 'none_observed' | 'unknown';
+    reason?: string | null;
+    previously_observed_at?: string;
+  };
+}
+
 export interface WorkflowStats {
+  bid_outcomes?: {
+    counts: {
+      submitted: number;
+      active: number;
+      awarded: number;
+      withdrawn: number;
+      inactive: number;
+      unknown: number;
+      responses: number;
+    };
+    rows: BidOutcomeObservation[];
+  };
   queue: Partial<Record<WorkflowState, number>>;
   stages: { stage: string; outcome: string; reason_code: string | null; count: number }[];
   model_usage: {
     calls: number;
     cache_hits: number;
+    assessment_reuses?: number;
     observed_tokens: number;
     token_usage_complete: boolean;
     cost: null;

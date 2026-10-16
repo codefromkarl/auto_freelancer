@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 from config import settings
 
-SCORING_VERSION = "2026-10-12-v3"
+SCORING_VERSION = "2026-10-14-v6"
 DIMENSIONS = ("budget_efficiency", "competition", "clarity", "customer", "tech", "risk")
 
 
@@ -58,7 +58,15 @@ def validate_result(result):
     questions = result.get("clarification_questions", [])
     if not isinstance(questions, list) or len(questions) > 5 or any(not isinstance(q, str) or not 1 <= len(q.strip()) <= 500 for q in questions):
         raise ValueError("Clarification questions must be at most five nonempty strings")
+    recommendation = result.get('recommendation', 'consider')
+    if recommendation not in {'consider', 'reject'}:
+        raise ValueError('Recommendation must be consider or reject')
+    assumptions = result.get('scope_assumptions', [])
+    if (not isinstance(assumptions, list) or len(assumptions)>5
+            or any(not isinstance(v,str) or not 1<=len(v.strip())<=500 for v in assumptions)):
+        raise ValueError('Scope assumptions must be at most five concise strings')
     return {**result, "clarification_questions": list(dict.fromkeys(q.strip() for q in questions)),
+            'recommendation': recommendation, 'scope_assumptions': assumptions,
             "dimension_scores": parsed, "estimated_hours": int(hours),
             "suggested_bid": quote}
 
@@ -111,6 +119,53 @@ def scoring_inputs(project):
             "submitdate": project.submitdate}
 
 
+
+def assessment_payload(payload):
+    """Only scope/reputation context reaches the model; live metrics are computed."""
+    stable = {key: value for key, value in payload.items()
+              if key not in {"bid_stats", "bid_stats_currency", "age_hours"}}
+    owner = object_value(stable.get("owner_info"))
+    if isinstance(owner, dict):
+        owner = {key: value for key, value in owner.items() if key != "payment_verified"}
+        if isinstance(owner.get("status"), dict):
+            owner["status"] = {key: value for key, value in owner["status"].items()
+                               if key != "payment_verified"}
+        # Missing and payment-only customer records convey the same model context.
+        owner = {key: value for key, value in owner.items() if value != {}}
+    stable["owner_info"] = owner or None
+    return stable
+
+
+def reusable_assessment(project, payload, prompt_hash, signature, now=None):
+    metadata = object_value(getattr(project, "score_metadata", None)) or {}
+    saved = metadata.get("model_assessment") or {}
+    if (metadata.get("source") != "llm" or metadata.get("version") != SCORING_VERSION
+            or metadata.get("policy_hash") != signature or saved.get("input_hash") != digest(assessment_payload(payload))
+            or saved.get("prompt_hash") != prompt_hash):
+        return None
+    try:
+        evaluated_at = datetime.fromisoformat(saved["evaluated_at"])
+        if evaluated_at.tzinfo is None:
+            return None
+        age = (now or datetime.now(timezone.utc)) - evaluated_at
+        if not timedelta(0) <= age < timedelta(hours=settings.SCORING_TTL_HOURS):
+            return None
+        result = validate_result(saved["result"])
+        return {**result, "_evaluated_at": saved["evaluated_at"]}
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return None
+
+
+def bind_assessment(metadata, result, payload, prompt_hash):
+    """Persist the actual model result, never reset its clock on program refresh."""
+    metadata["model_assessment"] = {
+        "input_hash": digest(assessment_payload(payload)), "prompt_hash": prompt_hash,
+        "evaluated_at": result.get("_evaluated_at") or datetime.now(timezone.utc).isoformat(),
+        "result": {key: value for key, value in validate_result(result).items()
+                   if not key.startswith("_") and key not in {"project_id", "metadata"}},
+    }
+
+
 def score_is_current(project, signature=None, now=None):
     metadata = object_value(getattr(project, "score_metadata", None))
     scored_at = getattr(project, "scored_at", None)
@@ -124,12 +179,16 @@ def score_is_current(project, signature=None, now=None):
     if not timedelta(0) <= now - scored_at < timedelta(hours=settings.SCORING_TTL_HOURS):
         return False
     try:
+        if metadata.get("model_assessment"):
+            evaluated_at = datetime.fromisoformat(metadata["model_assessment"]["evaluated_at"])
+            if evaluated_at.tzinfo is None or not timedelta(0) <= now - evaluated_at < timedelta(hours=settings.SCORING_TTL_HOURS):
+                return False
         return (metadata.get("policy_hash") == signature
                 and metadata.get("input_hash") == digest(scoring_inputs(project))
                 and metadata.get("total") == project.ai_score
                 and metadata.get("estimated_hours") == project.estimated_hours
                 and abs(float(metadata.get("quote_usd")) - float(project.suggested_bid)) < 0.011)
-    except (ValueError, TypeError):
+    except (KeyError, ValueError, TypeError):
         return False
 
 
@@ -202,6 +261,8 @@ def evaluate_result(project, result, payload, weights, signature):
         "estimated_fee_usd": fee, "unknown": unknown,
         "models": result.get("provider_model"), "model_score": result.get("score"),
         "clarification_questions": result["clarification_questions"],
+        'recommendation': result['recommendation'], 'scope_assumptions': result['scope_assumptions'],
+        'model_reason': result['reason'],
     }
     explanation = (f"{result['reason']} [计算净时薪 {net_hourly:.2f} USD/h；"
                    f"加权分 {total:.2f}；未知资料：{', '.join(unknown) or '无'}]")

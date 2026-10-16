@@ -45,8 +45,16 @@ async def create_bid(request: CreateBidRequest, db: Session = Depends(get_db)):
     """
     try:
         from services.approved_bids import submit_approved_bid, check_request
+        from config import settings
         if not request.approval_id:
-            raise ValueError('Prepare and approve the final bid snapshot through QQ Bot first')
+            if settings.BID_APPROVAL_MODE != 'automatic':
+                raise ValueError('Prepare and approve the final bid snapshot through QQ Bot first')
+            if not settings.BID_SUBMISSION_ENABLED:
+                raise ValueError('真实投标开关未开启')
+            from services.approved_bids import prepare_bid
+            snapshot = await prepare_bid(db, request.project_id, request.amount, request.period,
+                request.description, request.amount_currency)
+            request.approval_id = snapshot['id']
         check_request(request.approval_id, request.project_id, request.amount, request.period,
                       request.description, request.amount_currency)
         bid_data = await submit_approved_bid(db, request.approval_id)

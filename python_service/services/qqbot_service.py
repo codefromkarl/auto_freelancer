@@ -27,6 +27,9 @@ class QQBotConfig:
 
     @classmethod
     def from_env(cls) -> 'QQBotConfig':
+        if os.environ.get('BIDMASTER_LOCAL_MODE') == '1':
+            from desktop.paths import data_directory
+            return cls(state_path=str(data_directory() / 'qqbot.db'))
         values = {**dotenv_values(ROOT / '.env'), **dotenv_values(ROOT / '.env.qqbot'), **os.environ}
         return cls(
             app_id=values.get('QQ_BOT_APP_ID') or '',

@@ -50,6 +50,8 @@ export default function ProjectDetailPage() {
     refetchInterval: prepared ? 3000 : false,
   });
   const currentApproval = approval || prepared;
+  const automaticCandidate = currentApproval?.payload.authorization?.mode === 'automatic';
+  const automaticReady = ['auto_pending', 'auto_authorized'].includes(currentApproval?.state || '');
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => getProject(projectId),
@@ -290,7 +292,9 @@ export default function ProjectDetailPage() {
                         prepareMutation.isPending ||
                         bidMutation.isPending ||
                         (!!prepared &&
-                          (currentApproval?.state !== 'approved' ||
+                          ((automaticCandidate
+                            ? !automaticReady
+                            : currentApproval?.state !== 'approved') ||
                             !currentApproval?.submission_enabled))
                       }
                     >
@@ -299,13 +303,18 @@ export default function ProjectDetailPage() {
                         : bidMutation.isPending
                           ? '提交中...'
                           : prepared
-                            ? '提交已批准内容'
+                            ? automaticCandidate
+                              ? '按自动策略提交'
+                              : '提交已批准内容'
                             : '生成最终预览'}
                     </Button>
                   </div>
                   {prepared && (
                     <div className="space-y-2 text-sm">
-                      <p>QQ 审批状态：{currentApproval?.state}</p>
+                      <p>
+                        {automaticCandidate ? '自动候选状态' : 'QQ 审批状态'}：
+                        {currentApproval?.state}
+                      </p>
                       {!currentApproval?.submission_enabled && <p>真实投标尚未开启。</p>}
                       <pre className="whitespace-pre-wrap max-h-80 overflow-auto">
                         {prepared.payload.description}
@@ -344,7 +353,11 @@ export default function ProjectDetailPage() {
                           重新准备候选
                         </Button>
                       )}
-                      <p>请在 QQ 对机器人发送“候选”，核对完整内容后批准。</p>
+                      <p>
+                        {automaticCandidate
+                          ? '系统将在提交前核验最新需求、账号资格和投标额度，QQ 只发送结果通知。'
+                          : '请在 QQ 对机器人发送“候选”，核对完整内容后批准。'}
+                      </p>
                     </div>
                   )}
                 </div>

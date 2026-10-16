@@ -28,8 +28,12 @@ FEATURES = {
     'webhook_verification': ('Webhook 验签', (r'webhook.*(?:verif|valid|signature)', r'signature.*verif')),
     'dashboard_auth': ('后台鉴权', (r'authenticat.*dashboard', r'protected.*dashboard', r'dashboard.*login')),
     'duplicate_events': ('重复事件处理', (r'duplicat', r'idempoten', r'message.?id')),
-    'acceptance': ('验收/测试计划', (r'acceptance', r'\btest', r'checkpoint', r'sample.validation')),
-    'scope': ('范围及访问前提', (r'agreed.*(?:scope|batch|rules)', r'after.*(?:access|credentials)', r'one.*(?:number|provider)')),
+    'acceptance': ('验收/测试计划', (r'acceptance', r'\btest', r'checkpoint', r'sample.validation',
+                                  r'verif(?:y|ication)', r'validat', r'reconcil', r'spot.?check', r'row counts?')),
+    'scope': ('范围及访问前提', (r'agreed.*(?:scope|batch|rules)', r'after.*(?:access|credentials)', r'one.*(?:number|provider)',
+                               r'(?:after|once|when).*(?:file|pdf|data|access|credential|source|repository|provid|receiv)',
+                               r'\b(?:share|send|provide)\b.{0,80}\b(?:pdf|source|file|data|access)\b',
+                               r'(?:source|file|data|access|credential).*(?:confirmation|provided|supplied)')),
     'evidence_expression': ('案例/演示表达（未核验）', (r'https?://', r'\bgithub\b', r'\bdemo\b', r'\bportfolio\b', r'\bcase study\b')),
 }
 
@@ -38,6 +42,16 @@ def _mentions(text: str) -> dict:
     text = text.lower()
     return {key: any(re.search(pattern, text) for pattern in patterns)
             for key, (_, patterns) in FEATURES.items()}
+
+
+def required_delivery_issues(review):
+    features = review.get('our_features') or {}
+    issues = []
+    if not features.get('acceptance'):
+        issues.append('最终标书缺少具体的验收方案')
+    if not features.get('scope'):
+        issues.append('最终标书缺少范围/访问前提')
+    return issues
 
 
 def _family(project: dict) -> str:

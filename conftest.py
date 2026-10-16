@@ -9,7 +9,10 @@ _runtime = Path(__file__).resolve().parent / ".runtime"
 _runtime.mkdir(exist_ok=True)
 _state = TemporaryDirectory(prefix="tests-", dir=_runtime)
 os.environ.update(
-    BID_SUBMISSION_ENABLED='false', BID_MAX_DAILY_ATTEMPTS='1',
+    BID_SUBMISSION_ENABLED='false', BID_MAX_DAILY_ATTEMPTS='1', BID_APPROVAL_MODE='qq',
+    BID_MAX_DAILY_SCORED_PROJECTS='20', BID_MIN_AUTO_SCORE='7',
+    BID_MIN_NET_HOURLY_USD='15',
+    BID_AUTO_REQUIRE_VERIFIED_CLIENT_PAYMENT='true',
     FREELANCER_OAUTH_TOKEN="test-token", FREELANCER_USER_ID="999",
     PYTHON_API_KEY="test-api-key",
     DATABASE_PATH=str(Path(_state.name) / "test.db"),
@@ -36,4 +39,9 @@ def no_external_http(monkeypatch):
 
     monkeypatch.setattr(requests.sessions.Session, "request", blocked)
     monkeypatch.setattr(httpx.AsyncClient, "send", blocked_async)
+    try:
+        import httpx2
+        monkeypatch.setattr(httpx2.AsyncClient, "send", blocked_async)
+    except ImportError:
+        pass
     monkeypatch.setattr(aiohttp.ClientSession, "_request", blocked_async)

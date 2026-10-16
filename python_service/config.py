@@ -4,7 +4,7 @@ Configuration management for Freelancer Python API Service.
 
 from pydantic_settings import BaseSettings
 from pydantic import ValidationError, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pathlib import Path
 
 SERVICE_ROOT = Path(__file__).resolve().parent
@@ -21,6 +21,9 @@ class LLMConfig(BaseSettings):
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    # Explicit local distribution mode; legacy callers retain their original contract.
+    LOCAL_PRODUCT_MODE: bool = False
 
     # Freelancer API Configuration
     FREELANCER_OAUTH_TOKEN: str
@@ -171,9 +174,16 @@ class Settings(BaseSettings):
     BID_SELECTION_PROFILE: str = "newcomer"
     # Real submission is an independent, explicit operator switch.
     BID_SUBMISSION_ENABLED: bool = False
+    BID_APPROVAL_MODE: Literal["qq", "automatic"] = "qq"
     # 0 disables the local daily cap; platform quotas and approval/idempotency still apply.
     BID_MAX_DAILY_ATTEMPTS: int = Field(default=1, ge=0)
-    BID_MAX_DAILY_SCORED_PROJECTS: int = 20
+    BID_MAX_DAILY_SCORED_PROJECTS: int = Field(default=20, ge=0)
+    BID_MAX_SCORED_PROJECTS_PER_CYCLE: int = Field(default=20, gt=0)
+    BID_SEARCH_SKILL_IDS: List[int] = Field(default_factory=list)
+    BID_MIN_AUTO_SCORE: float = Field(default=7.0, ge=0, le=10, allow_inf_nan=False)
+    BID_AUTO_REQUIRE_VERIFIED_CLIENT_PAYMENT: bool = True
+    BID_AUTO_UNKNOWN_CLIENT_MAX_USD: float = Field(default=250.0, gt=0, allow_inf_nan=False)
+    BID_AUTO_UNKNOWN_CLIENT_MAX_HOURS: int = Field(default=20, gt=0)
     BID_MAX_CANDIDATE_PREPARATIONS_PER_CYCLE: int = 10
     BID_MAX_AMOUNT_USD: float = 1000.0
     BID_MIN_NET_HOURLY_USD: float = Field(default=15.0, gt=0, allow_inf_nan=False)
@@ -235,6 +245,11 @@ class Settings(BaseSettings):
             List of provider configs with 'name', 'api_key', 'base_url', 'model'
         """
         providers = []
+        if self.LOCAL_PRODUCT_MODE:
+            if self.LLM_API_KEY:
+                providers.append({'name': 'openai', 'api_key': self.LLM_API_KEY,
+                                  'base_url': self.LLM_API_URL, 'model': self.LLM_MODEL})
+            return providers
 
         if self.OPENAI_ENABLED and self.OPENAI_API_KEY:
             providers.append({
@@ -333,7 +348,12 @@ class Settings(BaseSettings):
 
 # Global settings instance
 try:
-    settings = Settings()
+    import os
+    if os.environ.get('BIDMASTER_LOCAL_MODE') == '1':
+        from desktop.configuration import engine_overrides
+        settings = Settings(_env_file=None, **engine_overrides(worker=os.environ.get('BIDMASTER_WORKER') == '1'))
+    else:
+        settings = Settings()
 except ValidationError as exc:
     fields = sorted({'.'.join(str(part) for part in error['loc']) for error in exc.errors(include_input=False)})
     raise RuntimeError('Application configuration is incomplete or invalid: ' + ', '.join(fields)) from None

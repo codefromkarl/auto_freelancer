@@ -201,7 +201,9 @@ def test_generation_receives_reference_and_returns_matching_evaluation(market):
     assert result['success'] and result['validation_passed']
     prompt=llm.generate_proposal.call_args.kwargs['user_prompt']
     assert 'COMPETITOR_REFERENCE_DATA' in prompt and '"median": 400.0' in prompt
-    assert 'agreed delivery period is 7' in prompt
+    assert 'offered delivery period is 7' in prompt
+    assert 'Do not claim the client has agreed' in prompt
+    assert 'do not offer text-layer-only delivery' in prompt
     assert result['competition_review']['text_digest']==hashlib.sha256(result['proposal'].encode()).hexdigest()
     llm.generate_proposal.return_value=PEER
     blocked=asyncio.run(service.generate_proposal(project,{'suggested_bid':500,'period':7},db=db))

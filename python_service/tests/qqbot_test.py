@@ -113,6 +113,17 @@ def test_daily_claim_and_duplicate_submission_limit(qq):
     assert store.score_allowance(8,10)==2
 
 
+def test_unlimited_scoring_keeps_usage_after_previous_daily_cap(qq):
+    _,store,_=qq
+    assert store.score_allowance(20,20)==20
+    assert store.score_allowance(5,20)==0
+    assert store.score_allowance(7,0)==7
+    assert store.score_allowance(4,0)==4
+    with store.connect() as db:
+        assert db.execute("SELECT count FROM usage WHERE kind='scores'").fetchone()['count']==31
+    with pytest.raises(ValueError):store.score_allowance(1,-1)
+
+
 def test_notification_success_is_confirmed_and_unknown_delivery_is_not_retried(qq):
     _, store, client = qq
     record = snapshot(store)

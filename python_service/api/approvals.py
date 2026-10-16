@@ -34,7 +34,7 @@ async def prepare(request: PrepareRequest, db: Session = Depends(get_db)):
 async def read_approval(approval_id: str):
     try:
         snapshot = QQBotStore(QQBotConfig.from_env().state_path).get(approval_id)
-        if snapshot['expires_at'] <= time.time() and snapshot['state'] in {'pending', 'approved'}:
+        if snapshot['expires_at'] <= time.time() and snapshot['state'] in {'pending', 'approved', 'auto_pending', 'auto_authorized'}:
             snapshot['state'] = 'expired'
         snapshot['submission_enabled'] = settings.BID_SUBMISSION_ENABLED
         return {'status': 'success', 'data': snapshot}
