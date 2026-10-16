@@ -70,7 +70,7 @@ python -m desktop.native_smoke --executable /path/to/BidMaster
 
 For installer replacement checks, pass an isolated `--data-dir` on the first run, replace the installed application, then repeat with the same directory and `--require-existing`. This verifies the same installation identity and project survived without creating a duplicate. After uninstall, `--data-dir PATH --verify-data-only` checks the original records read-only. CI preserves these separate JSON results alongside the packaged smoke proof.
 
-On Windows use `BidMaster.exe`; on macOS use `BidMaster.app/Contents/MacOS/BidMaster`. The smoke check covers native credential-vault roundtrip, manual import, safe exit, restart and data preservation without any model/platform requests. It must run independently on each target; a Linux result is not Windows/macOS evidence.
+On Windows use `BidMaster.exe`; on macOS use `BidMaster.app/Contents/MacOS/BidMaster`. The smoke check covers bundled IANA timezone data, native credential-vault roundtrip, manual import, safe exit, restart and data preservation without any model/platform requests. It must run independently on each target; a Linux result is not Windows/macOS evidence.
 
 ## Publisher licensing
 

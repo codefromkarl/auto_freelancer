@@ -486,6 +486,14 @@ def create_app(
 
     @app.get("/api/diagnostics")
     def diagnostics():
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            for name in ("UTC", "Asia/Shanghai", "America/New_York"):
+                ZoneInfo(name)
+            timezone_database = True
+        except ZoneInfoNotFoundError:
+            timezone_database = False
         with database.session() as db:
             counts = dict(
                 db.query(Job.state, func.count(Job.id)).group_by(Job.state).all()
@@ -495,6 +503,7 @@ def create_app(
             "version": __version__,
             "jobs": counts,
             "vault_available": vault.status()["available"],
+            "timezone_database": timezone_database,
             "license_active": licenses.status()["active"],
             "platform": platform.status(),
             "includes_credentials": False,

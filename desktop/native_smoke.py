@@ -82,6 +82,7 @@ def main(argv=None):
 
             health = request("/health")
             assert health["app"] == "BidMaster Local"
+            assert request("/api/diagnostics")["timezone_database"]
             installation_id = request("/api/status")["config"]["installation_id"]
             assert installation_id
             if checkpoint:

@@ -59,3 +59,12 @@ def test_blocking_acquisition_waits_for_other_process(tmp_path):
         if child.poll() is None:
             child.kill()
             child.communicate(timeout=10)
+
+
+def test_scheduler_named_timezones_are_available():
+    from zoneinfo import ZoneInfo
+    import scheduler
+
+    for name in ('UTC', 'Asia/Shanghai', 'America/New_York'):
+        assert ZoneInfo(name).key == name
+        assert 0 <= scheduler._get_local_hour(name) <= 23

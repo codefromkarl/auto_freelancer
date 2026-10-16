@@ -220,6 +220,8 @@ typing-extensions==4.16.0
     #   typing-inspect
 typing-inspect==0.9.0
     # via dataclasses-json
+tzdata==2026.5 ; sys_platform == 'win32'
+    # via -r desktop/requirements.txt
 urllib3==2.8.0
     # via requests
 uvicorn==0.30.0

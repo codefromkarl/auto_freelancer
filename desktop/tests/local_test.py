@@ -87,6 +87,7 @@ def test_loopback_auth_origin_and_secret_safe_validation(local):
 
 def test_credentials_never_enter_json_responses_or_diagnostics(local):
     configure(local)
+    assert local.client.get('/api/diagnostics').json()['timezone_database']
     assert local.client.put('/api/account',json={'account_id':123,'token':'private-platform-token'}).status_code==200
     assert 'private-model-key' not in (local.directory/'config.json').read_text()
     for path in ['/api/status','/api/diagnostics','/api/projects','/api/jobs']:
