@@ -1,7 +1,7 @@
 """Run the actual bundled executable without Python/Node installation assumptions."""
 
 import argparse
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 import json
 import os
 from pathlib import Path
@@ -17,7 +17,7 @@ def check_preserved_data(data):
     checkpoint = json.loads((data / "smoke-checkpoint.json").read_text(encoding="utf-8"))
     config = json.loads((data / "config.json").read_text(encoding="utf-8"))
     assert config["installation_id"] == checkpoint["installation_id"]
-    with sqlite3.connect((data / "projects.db").resolve().as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect((data / "projects.db").resolve().as_uri() + "?mode=ro", uri=True)) as db:
         rows = db.execute("SELECT freelancer_id, title FROM projects").fetchall()
     assert rows == [(checkpoint["project_id"], "Portable Python task")], rows
     return checkpoint

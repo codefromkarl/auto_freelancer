@@ -1,6 +1,6 @@
 """Local schema and durable jobs; never opens the personal runtime database."""
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import create_engine, Column, String, Integer, Text, DateTime, event
@@ -70,7 +70,8 @@ class Database:
         import sqlite3
 
         with (
-            sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True) as src,
-            sqlite3.connect(destination) as dst,
+            closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as src,
+            closing(sqlite3.connect(destination)) as dst,
+            dst,
         ):
             src.backup(dst)

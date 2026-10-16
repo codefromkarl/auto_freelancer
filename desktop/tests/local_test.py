@@ -310,3 +310,23 @@ def test_installed_build_cannot_override_publisher_identity(monkeypatch,tmp_path
     monkeypatch.setattr(sys,'frozen',True,raising=False)
     with pytest.raises(SystemExit) as exc:main(['--publisher-public-key',str(tmp_path/'other.pem')])
     assert exc.value.code==2
+
+
+def test_backup_closes_both_connections_before_returning(local, monkeypatch):
+    import sqlite3
+
+    opened = []
+    original = sqlite3.connect
+
+    def tracked(*args, **kwargs):
+        connection = original(*args, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, 'connect', tracked)
+    destination = local.directory / 'closed-backup.db'
+    local.app.state.database.backup(destination)
+    assert destination.exists() and len(opened) == 2
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            connection.execute('SELECT 1')
