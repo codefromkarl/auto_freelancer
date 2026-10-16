@@ -276,10 +276,10 @@ def test_cli_review_uses_frozen_evaluation_and_never_prints_stale_as_zero(market
     monkeypatch.setattr(module,'_refresh_remote_status_and_filter',AsyncMock(return_value=([project],0)))
     report=tmp_path/'review.md'
     assert module.main(['--threshold','7','--output',str(report)])==0
-    assert '中位价 400 USD' in report.read_text()
+    assert '中位价 400 USD' in report.read_text(encoding="utf-8")
     audit=db.query(AuditLog).filter_by(action='competitor_snapshot').one()
     meta=json.loads(audit.response_data);meta['fetched_at']=(datetime.utcnow()-timedelta(hours=2)).isoformat()
     audit.response_data=json.dumps(meta);db.commit()
     assert module.main(['--threshold','7','--output',str(report)])==0
-    text=report.read_text()
+    text=report.read_text(encoding="utf-8")
     assert 'N/A (stale)' in text and 'median=unknown' in text
