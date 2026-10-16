@@ -54,7 +54,7 @@ BID_MIN_NET_HOURLY_USD=15
 BID_MAX_ESTIMATED_HOURS=40
 ```
 
-这些是受控试运行上限，不是通用接单标准。`BID_MAX_DAILY_ATTEMPTS=0` 取消本地每日次数限制，仍统计尝试；平台额度、过期、内容校验与防重继续生效。操作者明确开启真实投标后设置 true 并启动 `scheduler.py --submit`。QQ 模式需内容批准；automatic 模式需有效系统决策、明确付款验证、当前完整评分和竞标评估、收益及账号资格通过。详细条件见 [自动投标计划](../plans/2026-10-12-automatic-bidding.md)。
+这些是受控试运行上限，不是通用接单标准。`BID_MAX_DAILY_ATTEMPTS=0` 取消本地每日次数限制，仍统计尝试；平台额度、过期、内容校验与防重继续生效。操作者明确开启真实投标后设置 true 并启动 `scheduler.py --submit`。QQ 模式需内容批准；automatic 模式需有效系统决策、明确付款验证、当前完整评分和竞标评估、收益及账号资格通过。详细条件见 [自动模式契约](../architecture/ARCHITECTURE.md#无人工审批的自动模式)。
 
 ## 运行方式与限制
 

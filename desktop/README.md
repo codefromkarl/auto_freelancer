@@ -56,6 +56,8 @@ python -m pip install -r desktop/requirements-build.txt
 python -m desktop.build --issuer-public-key /secure/path/issuer-public.pem --output dist/local --installer
 ```
 
+Intel macOS builds compile the locked cryptography release with static OpenSSL to avoid colliding with Python's bundled OpenSSL dylibs. Before installing dependencies in the build environment, use `OPENSSL_STATIC=1 OPENSSL_DIR="$(brew --prefix openssl@3)" PIP_NO_BINARY=cryptography PIP_NO_CACHE_DIR=1` as environment variables. Xcode command-line tools, Rust and Homebrew OpenSSL are build prerequisites only; customers do not install them. This follows [cryptography's native build guidance](https://cryptography.io/en/stable/installation/).
+
 Windows needs Inno Setup 6 for its per-user installer. macOS creates `.app` and `.dmg` with an Applications shortcut. User data lives outside the installation and is preserved by upgrade/uninstall. The unsigned CI workflow uses a disposable **test** issuer; those artifacts are development previews, not commercial releases.
 
 Optional production signing uses `--sign` plus an existing authorized certificate in the Windows store (`BIDMASTER_WINDOWS_CERT_SHA1`) or an existing Developer ID identity (`BIDMASTER_MAC_SIGN_IDENTITY`). macOS notarization uses `--notarize-profile` with an already configured notarytool keychain profile. No developer account, certificate, subscription, or CI resource is created or purchased by these scripts.
@@ -65,6 +67,8 @@ Run the actual executable:
 ```sh
 python -m desktop.native_smoke --executable /path/to/BidMaster
 ```
+
+For installer replacement checks, pass an isolated `--data-dir` on the first run, replace the installed application, then repeat with the same directory and `--require-existing`. This verifies the same installation identity and project survived without creating a duplicate. After uninstall, `--data-dir PATH --verify-data-only` checks the original records read-only. CI preserves these separate JSON results alongside the packaged smoke proof.
 
 On Windows use `BidMaster.exe`; on macOS use `BidMaster.app/Contents/MacOS/BidMaster`. The smoke check covers native credential-vault roundtrip, manual import, safe exit, restart and data preservation without any model/platform requests. It must run independently on each target; a Linux result is not Windows/macOS evidence.
 

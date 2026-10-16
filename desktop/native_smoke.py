@@ -1,21 +1,49 @@
 """Run the actual bundled executable without Python/Node installation assumptions."""
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import time
 from urllib.request import Request, urlopen
 
 
+def check_preserved_data(data):
+    """Read-only check after an installer or app bundle has been removed."""
+    checkpoint = json.loads((data / "smoke-checkpoint.json").read_text(encoding="utf-8"))
+    config = json.loads((data / "config.json").read_text(encoding="utf-8"))
+    assert config["installation_id"] == checkpoint["installation_id"]
+    with sqlite3.connect((data / "projects.db").resolve().as_uri() + "?mode=ro", uri=True) as db:
+        rows = db.execute("SELECT freelancer_id, title FROM projects").fetchall()
+    assert rows == [(checkpoint["project_id"], "Portable Python task")], rows
+    return checkpoint
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--executable", type=Path, required=True)
+    parser.add_argument("--executable", type=Path)
+    parser.add_argument("--data-dir", type=Path, help="Persistent isolated smoke state for installer replacement checks")
+    parser.add_argument("--require-existing", action="store_true", help="Fail if an earlier installation lost its records")
+    parser.add_argument("--verify-data-only", action="store_true", help="Read-only check after uninstall/removing the app")
     args = parser.parse_args(argv)
-    with tempfile.TemporaryDirectory(prefix="bidmaster-smoke-") as temporary:
-        data = Path(temporary) / "data with spaces # é"
+    if args.verify_data_only:
+        if not args.data_dir:
+            parser.error("--verify-data-only requires --data-dir")
+        check_preserved_data(args.data_dir)
+        print(json.dumps({"uninstall_preserves_data": True}))
+        return 0
+    if not args.executable:
+        parser.error("--executable is required to launch the app")
+    if args.require_existing and not args.data_dir:
+        parser.error("--require-existing requires --data-dir")
+    context = nullcontext(None) if args.data_dir else tempfile.TemporaryDirectory(prefix="bidmaster-smoke-")
+    with context as temporary:
+        data = args.data_dir.resolve() if args.data_dir else Path(temporary) / "data with spaces # é"
+        checkpoint = check_preserved_data(data) if args.require_existing else None
         process = subprocess.Popen(
             [str(args.executable.resolve()), "--data-dir", str(data), "--no-browser"],
             stdout=subprocess.PIPE,
@@ -54,7 +82,10 @@ def main(argv=None):
 
             health = request("/health")
             assert health["app"] == "BidMaster Local"
-            assert request("/api/status")["config"]["installation_id"]
+            installation_id = request("/api/status")["config"]["installation_id"]
+            assert installation_id
+            if checkpoint:
+                assert installation_id == checkpoint["installation_id"]
             if os.name == "nt" or __import__("sys").platform == "darwin":
                 request(
                     "/api/provider",
@@ -75,22 +106,27 @@ def main(argv=None):
                     {"provider": {"model": "smoke-no-network"}, "api_key": ""},
                 )
                 assert not request("/api/status")["vault"]["provider_key_saved"]
-            project = request(
-                "/api/projects",
-                "POST",
-                {
-                    "title": "Portable Python task",
-                    "description": "Create a Python CSV validation script with acceptance tests and a setup guide.",
-                    "budget_minimum": 100,
-                    "budget_maximum": 300,
-                },
-            )
+            if checkpoint:
+                projects = request("/api/projects")
+                assert [p["id"] for p in projects] == [checkpoint["project_id"]]
+                project = projects[0]
+            else:
+                project = request(
+                    "/api/projects",
+                    "POST",
+                    {
+                        "title": "Portable Python task",
+                        "description": "Create a Python CSV validation script with acceptance tests and a setup guide.",
+                        "budget_minimum": 100,
+                        "budget_maximum": 300,
+                    },
+                )
             assert project["id"] < 0
             request("/api/queue", "POST", {"paused": True})
             request("/api/shutdown", "POST", {})
             process.wait(timeout=60)
             assert process.returncode == 0
-            # Same data survives a second launch: this is also the basic upgrade-data contract.
+            # Same data survives a second launch of this actual installed executable.
             process = subprocess.Popen(
                 [
                     str(args.executable.resolve()),
@@ -112,6 +148,10 @@ def main(argv=None):
             request("/api/shutdown", "POST", {})
             process.wait(timeout=60)
             assert process.returncode == 0
+            from desktop.paths import atomic_json
+
+            atomic_json(data / "smoke-checkpoint.json", {"installation_id": installation_id, "project_id": project["id"]})
+            check_preserved_data(data)
             print(
                 json.dumps(
                     {
@@ -120,6 +160,7 @@ def main(argv=None):
                         "profile_created": True,
                         "manual_import": True,
                         "restart_preserves_data": True,
+                        "installer_replacement_preserves_data": bool(checkpoint),
                         "native_vault": os.name == "nt"
                         or __import__("sys").platform == "darwin",
                         "platform": {"win32": "windows", "darwin": "macos"}.get(

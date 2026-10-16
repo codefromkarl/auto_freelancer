@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      ["desktop/**", "python_service/**", ".github/workflows/local-product.yml"]
+      ["desktop/**", "python_service/**", "scripts/**", "conftest.py", ".github/workflows/local-product.yml"]
 permissions:
   contents: read
 jobs:
@@ -30,6 +30,14 @@ jobs:
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.12"
+      - name: Build Intel macOS cryptography with its own static OpenSSL
+        if: matrix.platform == 'macos' && matrix.architecture == 'x64'
+        shell: bash
+        run: |
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "PIP_NO_BINARY=cryptography" >> "$GITHUB_ENV"
+          echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
       - name: Install application and isolated test dependencies
         run: python -m pip install -r desktop/requirements-lock.txt -r desktop/requirements-build.txt pytest pytest-asyncio
       - name: Verify contracts without real HTTP
@@ -54,10 +62,18 @@ jobs:
           $setup = Resolve-Path "dist/local/BidMaster-0.1.0-windows-x64-setup.exe"
           $p = Start-Process $setup -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$target`"" -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "Installer failed" }
-          python -m desktop.native_smoke --executable "$target/BidMaster.exe"
+          $state = Join-Path $env:RUNNER_TEMP "BidMaster data with spaces"
+          python -m desktop.native_smoke --executable "$target/BidMaster.exe" --data-dir "$state"
           if ($LASTEXITCODE -ne 0) { throw "Installed application smoke failed" }
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$target`"" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Installer replacement failed" }
+          python -m desktop.native_smoke --executable "$target/BidMaster.exe" --data-dir "$state" --require-existing | Tee-Object -FilePath dist/local/installed-smoke-windows-x64.json
+          if ($LASTEXITCODE -ne 0) { throw "Installer replacement lost data" }
           $u = Start-Process "$target/unins000.exe" -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -PassThru -Wait
           if ($u.ExitCode -ne 0) { throw "Uninstall failed" }
+          if (Test-Path "$target/BidMaster.exe") { throw "Installed executable was not removed" }
+          python -m desktop.native_smoke --data-dir "$state" --verify-data-only | Tee-Object -FilePath dist/local/uninstall-smoke-windows-x64.json
+          if ($LASTEXITCODE -ne 0) { throw "Uninstall lost user data" }
       - name: macOS disk image attachment and installed application
         if: matrix.platform == 'macos'
         shell: bash
@@ -68,7 +84,16 @@ jobs:
           hdiutil attach "dist/local/BidMaster-0.1.0-macos-${{ matrix.architecture }}.dmg" -mountpoint "$mount" -nobrowse
           ditto "$mount/BidMaster.app" "$installed"
           hdiutil detach "$mount"
-          python -m desktop.native_smoke --executable "$installed/Contents/MacOS/BidMaster"
+          state="$RUNNER_TEMP/BidMaster data with spaces"
+          python -m desktop.native_smoke --executable "$installed/Contents/MacOS/BidMaster" --data-dir "$state"
+          # Remove only this job-owned installed test bundle, then install it again.
+          rm -rf "$installed"
+          hdiutil attach "dist/local/BidMaster-0.1.0-macos-${{ matrix.architecture }}.dmg" -mountpoint "$mount" -nobrowse
+          ditto "$mount/BidMaster.app" "$installed"
+          hdiutil detach "$mount"
+          python -m desktop.native_smoke --executable "$installed/Contents/MacOS/BidMaster" --data-dir "$state" --require-existing | tee dist/local/installed-smoke-macos-${{ matrix.architecture }}.json
+          rm -rf "$installed"
+          python -m desktop.native_smoke --data-dir "$state" --verify-data-only | tee dist/local/uninstall-smoke-macos-${{ matrix.architecture }}.json
       - name: Preserve development artifacts only (no private test issuer)
         uses: actions/upload-artifact@v7.0.2
         with:
@@ -79,4 +104,6 @@ jobs:
             dist/local/*.dmg
             dist/local/manifest-*.json
             dist/local/native-smoke-*.json
+            dist/local/installed-smoke-*.json
+            dist/local/uninstall-smoke-*.json
           retention-days: 7

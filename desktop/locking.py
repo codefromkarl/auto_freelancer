@@ -14,10 +14,7 @@ class InstanceLock:
         if os.name == "nt":
             import msvcrt
 
-            self.handle.seek(0, os.SEEK_END)
-            if self.handle.tell() == 0:
-                self.handle.write(b"0")
-                self.handle.flush()
+            # Byte-range locks may extend beyond EOF, so an empty lock file is valid.
             self.handle.seek(0)
             try:
                 msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
